@@ -23,6 +23,7 @@ Turn any live stream into your screensaver/lockscreen. Some examples:
 - macOS
 - Swift compiler (Xcode Command Line Tools)
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) (optional, for YouTube support)
+- [ffmpeg](https://ffmpeg.org/) (optional, required alongside yt-dlp for YouTube support)
 
 **Disclaimer**: This project was entirely vibe-coded. I've never written Swift before in my life.
 
@@ -30,16 +31,17 @@ Turn any live stream into your screensaver/lockscreen. Some examples:
 
 ## Installation
 
-### Install yt-dlp (for YouTube support)
+### Install yt-dlp and ffmpeg (for YouTube support)
 
 Using Homebrew:
 ```bash
-brew install yt-dlp
+brew install yt-dlp ffmpeg
 ```
 
-Or using pip:
+Or install yt-dlp using pip:
 ```bash
 pip install yt-dlp
+brew install ffmpeg
 ```
 
 ### Build and Install
@@ -79,7 +81,7 @@ make start      # Trigger screensaver immediately
 ## Troubleshooting
 
 **YouTube videos don't play**:
-- Make sure yt-dlp is installed and in your PATH
+- Make sure yt-dlp and ffmpeg are installed and in your PATH
 - Verify you're using a **live** YouTube stream - regular videos are not supported
 
 **Black screen**: Wait a few seconds for loading, or try a different URL
