@@ -1,13 +1,14 @@
-import ScreenSaver
 import AVFoundation
-import CryptoKit
 import Cocoa
+import CryptoKit
 import Quartz
+import ScreenSaver
 
 private let ModuleName = "com.livescreensaver.app"
 private let URLKey = "HLSStreamURL"
 private let StreamStartTimeKey = "StreamStartTime"
-private let DefaultURL = "https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_adv_example_hevc/master.m3u8"
+private let DefaultURL =
+    "https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_adv_example_hevc/master.m3u8"
 
 class LiveScreensaverView: ScreenSaverView {
 
@@ -25,7 +26,8 @@ class LiveScreensaverView: ScreenSaverView {
     private var currentSourceURL: String?
     private var startTime = Date()
 
-    private static let expirationRegex = try? NSRegularExpression(pattern: "expire/([0-9]+)", options: [])
+    private static let expirationRegex = try? NSRegularExpression(
+        pattern: "expire/([0-9]+)", options: [])
     private static let preferredTimescale: CMTimeScale = 600
 
     private func getSystemIdleTime() -> TimeInterval {
@@ -56,10 +58,40 @@ class LiveScreensaverView: ScreenSaverView {
 
     private func needsYtDlpExtraction(_ urlString: String) -> Bool {
         guard let url = URL(string: urlString),
-              let path = url.path.split(separator: "/").last else {
+            let path = url.path.split(separator: "/").last
+        else {
             return true
         }
         return !path.contains(".m3u8")
+    }
+
+    private func isStreamPlaceURL(_ urlString: String) -> Bool {
+        guard let url = URL(string: urlString),
+            let host = url.host?.lowercased()
+        else {
+            return false
+        }
+        return host == "stream.place" || host.hasSuffix(".stream.place")
+    }
+
+    private func getStreamPlaceHLSURL(_ urlString: String) -> URL? {
+        guard let url = URL(string: urlString),
+            let host = url.host
+        else {
+            return nil
+        }
+
+        let path = url.path
+        // Extract username from path (handles /username or /embed/username)
+        var username = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if username.hasPrefix("embed/") {
+            username = String(username.dropFirst(6))
+        }
+        guard !username.isEmpty else {
+            return nil
+        }
+
+        return URL(string: "https://\(host)/api/playback/\(username)/hls/index.m3u8")
     }
 
     private func md5Hash(_ string: String) -> String {
@@ -75,8 +107,10 @@ class LiveScreensaverView: ScreenSaverView {
 
     private func extractExpirationTimestamp(from url: String) -> TimeInterval? {
         guard let regex = Self.expirationRegex,
-              let match = regex.firstMatch(in: url, options: [], range: NSRange(url.startIndex..., in: url)),
-              match.numberOfRanges > 1 else {
+            let match = regex.firstMatch(
+                in: url, options: [], range: NSRange(url.startIndex..., in: url)),
+            match.numberOfRanges > 1
+        else {
             return nil
         }
 
@@ -140,7 +174,8 @@ class LiveScreensaverView: ScreenSaverView {
 
     private func getExtractionLockPath(for url: String) -> String {
         let hash = md5Hash(url)
-        return (NSTemporaryDirectory() as NSString).appendingPathComponent("screensaver_\(hash)_lock")
+        return (NSTemporaryDirectory() as NSString).appendingPathComponent(
+            "screensaver_\(hash)_lock")
     }
 
     private func extractHLSURL(_ sourceURL: String, forceRefresh: Bool = false) -> String? {
@@ -179,10 +214,14 @@ class LiveScreensaverView: ScreenSaverView {
             "/opt/homebrew/bin/yt-dlp",
             "/usr/local/bin/yt-dlp",
             "/opt/local/bin/yt-dlp",
-            (NSHomeDirectory() as NSString).appendingPathComponent(".local/bin/yt-dlp")
+            (NSHomeDirectory() as NSString).appendingPathComponent(".local/bin/yt-dlp"),
         ]
 
-        guard let executablePath = ytdlpPaths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+        guard
+            let executablePath = ytdlpPaths.first(where: {
+                FileManager.default.isExecutableFile(atPath: $0)
+            })
+        else {
             try? FileManager.default.removeItem(atPath: lockFile)
             return nil
         }
@@ -204,9 +243,11 @@ class LiveScreensaverView: ScreenSaverView {
 
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
 
-            if let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !output.isEmpty,
-               let firstURL = output.components(separatedBy: .newlines).first {
+            if let output = String(data: data, encoding: .utf8)?.trimmingCharacters(
+                in: .whitespacesAndNewlines),
+                !output.isEmpty,
+                let firstURL = output.components(separatedBy: .newlines).first
+            {
                 cacheHLSURL(firstURL, for: sourceURL)
                 extractedURL = firstURL
             }
@@ -223,6 +264,14 @@ class LiveScreensaverView: ScreenSaverView {
         animationTimeInterval = 1.0 / 30.0
 
         let originalURLString = defaults.string(forKey: URLKey) ?? DefaultURL
+
+        // Check if this is a stream.place URL - convert to HLS URL
+        if isStreamPlaceURL(originalURLString) {
+            if let hlsURL = getStreamPlaceHLSURL(originalURLString) {
+                loadVideo(url: hlsURL)
+            }
+            return
+        }
 
         var urlString = originalURLString
 
@@ -348,7 +397,9 @@ class LiveScreensaverView: ScreenSaverView {
 
         let syncedPosition = elapsedTime.truncatingRemainder(dividingBy: videoDuration)
 
-        player.seek(to: CMTime(seconds: syncedPosition, preferredTimescale: Self.preferredTimescale)) { [weak self] finished in
+        player.seek(
+            to: CMTime(seconds: syncedPosition, preferredTimescale: Self.preferredTimescale)
+        ) { [weak self] finished in
             if finished {
                 self?.player?.play()
             }
@@ -487,11 +538,12 @@ class ConfigureWindowController: NSWindowController {
 
         urlTextField = NSTextField()
         urlTextField.frame = NSRect(x: 20, y: 60, width: 440, height: 24)
-        urlTextField.placeholderString = "Enter YouTube URL or HLS stream URL (.m3u8)"
+        urlTextField.placeholderString = "Enter YouTube, stream.place, or HLS stream URL"
         urlTextField.stringValue = defaults.string(forKey: URLKey) ?? DefaultURL
         contentView.addSubview(urlTextField)
 
-        let infoLabel = NSTextField(labelWithString: "Supports YouTube URLs (auto-extracted via yt-dlp) or direct HLS streams")
+        let infoLabel = NSTextField(
+            labelWithString: "Supports stream.place, YouTube (via yt-dlp), or direct HLS streams")
         infoLabel.frame = NSRect(x: 20, y: 35, width: 440, height: 20)
         infoLabel.font = NSFont.systemFont(ofSize: 11)
         infoLabel.textColor = .secondaryLabelColor

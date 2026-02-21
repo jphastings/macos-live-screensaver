@@ -1,6 +1,6 @@
 # MacOS Live Screensaver
 
-A macOS screensaver that plays live video streams. Supports YouTube videos and direct HLS streams.
+A macOS screensaver that plays live video streams. Supports YouTube videos, [stream.place](https://stream.place) videos, and direct HLS streams.
 
 > **Also available:** [Android TV Live Screensaver](https://github.com/hauxir/androidtv-live-screensaver)
 
@@ -72,6 +72,7 @@ make start      # Trigger screensaver immediately
 4. Enter a video URL:
    - YouTube: `https://www.youtube.com/watch?v=VIDEO_ID` **(live streams only)**
    - HLS stream: `https://example.com/stream.m3u8`
+   - stream.place: `https://stream.place/byjp.me`
 
 **Note**: Only live YouTube videos are supported. Regular (non-live) YouTube videos will not work.
 
