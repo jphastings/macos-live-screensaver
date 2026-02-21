@@ -16,6 +16,7 @@ class LiveScreensaverView: ScreenSaverView {
     private var player: AVPlayer?
     private var playerItem: AVPlayerItem?
     private var statusObservation: NSKeyValueObservation?
+    private var spinnerLayer: CAShapeLayer?
     private let defaults = ScreenSaverDefaults(forModuleWithName: ModuleName)!
     private let cacheExpirationSeconds: TimeInterval = 300
     private let extractionTimeoutSeconds: TimeInterval = 15
@@ -260,8 +261,46 @@ class LiveScreensaverView: ScreenSaverView {
         return extractedURL
     }
 
+    private func showSpinner() {
+        let size: CGFloat = 32
+        let lineWidth: CGFloat = 3
+
+        let spinner = CAShapeLayer()
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        let radius = (size - lineWidth) / 2
+
+        let path = CGMutablePath()
+        path.addArc(center: CGPoint(x: size/2, y: size/2), radius: radius,
+                    startAngle: 0, endAngle: .pi * 1.5, clockwise: false)
+
+        spinner.path = path
+        spinner.fillColor = nil
+        spinner.strokeColor = CGColor(gray: 1.0, alpha: 0.8)
+        spinner.lineWidth = lineWidth
+        spinner.lineCap = .round
+        spinner.frame = CGRect(x: center.x - size/2, y: center.y - size/2, width: size, height: size)
+
+        let rotation = CABasicAnimation(keyPath: "transform.rotation.z")
+        rotation.fromValue = 0
+        rotation.toValue = CGFloat.pi * 2
+        rotation.duration = 1.0
+        rotation.repeatCount = .infinity
+        spinner.add(rotation, forKey: "spin")
+
+        wantsLayer = true
+        layer?.addSublayer(spinner)
+        spinnerLayer = spinner
+    }
+
+    private func hideSpinner() {
+        spinnerLayer?.removeAllAnimations()
+        spinnerLayer?.removeFromSuperlayer()
+        spinnerLayer = nil
+    }
+
     private func setupScreensaver() {
         animationTimeInterval = 1.0 / 30.0
+        showSpinner()
 
         let originalURLString = defaults.string(forKey: URLKey) ?? DefaultURL
 
@@ -327,6 +366,7 @@ class LiveScreensaverView: ScreenSaverView {
 
         statusObservation = playerItem?.observe(\.status, options: [.new]) { [weak self] item, _ in
             if item.status == .readyToPlay {
+                self?.hideSpinner()
                 self?.synchronizePlayback()
                 self?.stallDetectionTime = nil
                 self?.retryCount = 0

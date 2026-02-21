@@ -85,4 +85,4 @@ make start      # Trigger screensaver immediately
 - Make sure yt-dlp and ffmpeg are installed and in your PATH
 - Verify you're using a **live** YouTube stream - regular videos are not supported
 
-**Black screen**: Wait a few seconds for loading, or try a different URL
+**Black screen/constant loading spinner**: Wait a few seconds for loading, or try a different URL
