@@ -60,52 +60,273 @@ private func getStreamPlaceHLSURL(_ urlString: String) -> URL? {
     return URL(string: "https://\(host)/api/playback/\(username)/hls/index.m3u8")
 }
 
-class LiveScreensaverView: ScreenSaverView {
+// MARK: - Shared Player Manager (singleton for multi-monitor support)
 
-    private var playerLayer: AVPlayerLayer?
-    private var player: AVPlayer?
+private extension Notification.Name {
+    static let sharedPlayerReady = Notification.Name("SharedPlayerReadyNotification")
+}
+
+/// Manages a single AVPlayer instance shared across all screensaver views.
+/// This ensures the video is streamed only once, regardless of how many monitors are connected.
+private class SharedPlayerManager {
+    static let shared = SharedPlayerManager()
+
+    private(set) var player: AVPlayer?
     private var playerItem: AVPlayerItem?
     private var statusObservation: NSKeyValueObservation?
-    private var spinnerLayer: CAShapeLayer?
+    private var viewCount = 0
+    private var isSettingUp = false
+    private var currentSourceURL: String?
+    private var retryCount = 0
+
     private let defaults = ScreenSaverDefaults(forModuleWithName: ModuleName)!
     private let cacheExpirationSeconds: TimeInterval = 300
     private let extractionTimeoutSeconds: TimeInterval = 15
-    private var retryCount = 0
     private let maxRetries = 3
-    private var stallDetectionTime: Date?
     private let stallTimeoutSeconds: TimeInterval = 10
-    private var currentSourceURL: String?
-    private var startTime = Date()
+    private var stallDetectionTime: Date?
 
     private static let expirationRegex = try? NSRegularExpression(
         pattern: "expire/([0-9]+)", options: [])
     private static let preferredTimescale: CMTimeScale = 600
 
-    private func getSystemIdleTime() -> TimeInterval {
-        return CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .mouseMoved)
+    private init() {}
+
+    func registerView() {
+        viewCount += 1
+        if viewCount == 1 && player == nil && !isSettingUp {
+            setupPlayer()
+        }
     }
 
-    private func isScreenLocked() -> Bool {
-        guard let sessionDict = CGSessionCopyCurrentDictionary() as? [String: Any] else {
-            return false
+    func unregisterView() {
+        viewCount -= 1
+        if viewCount <= 0 {
+            cleanup()
+        }
+    }
+
+    private func notifyViewsPlayerReady() {
+        NotificationCenter.default.post(name: .sharedPlayerReady, object: self)
+    }
+
+    private func setupPlayer() {
+        guard !isSettingUp else {
+            return
+        }
+        isSettingUp = true
+
+        let originalURLString = defaults.string(forKey: URLKey) ?? DefaultURL
+
+        if isStreamPlaceURL(originalURLString) {
+            if let hlsURL = getStreamPlaceHLSURL(originalURLString) {
+                loadVideo(url: hlsURL)
+            }
+            return
         }
 
-        if let isLocked = sessionDict["CGSSessionScreenIsLocked"] as? Bool {
-            return isLocked
+        var urlString = originalURLString
+
+        if needsYtDlpExtraction(originalURLString) {
+            currentSourceURL = originalURLString
+
+            if let cachedURL = getCachedHLSURL(for: originalURLString) {
+                urlString = cachedURL
+
+                DispatchQueue.global(qos: .background).async { [weak self] in
+                    _ = self?.extractHLSURL(originalURLString, forceRefresh: true)
+                }
+            } else {
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    if let hlsURL = self?.extractHLSURL(originalURLString) {
+                        DispatchQueue.main.async {
+                            if let url = URL(string: hlsURL) {
+                                self?.loadVideo(url: url)
+                            }
+                        }
+                    }
+                }
+                return
+            }
         }
 
-        return false
+        guard let url = URL(string: urlString) else {
+            isSettingUp = false
+            return
+        }
+
+        loadVideo(url: url)
     }
 
-    override init?(frame: NSRect, isPreview: Bool) {
-        super.init(frame: frame, isPreview: isPreview)
-        setupScreensaver()
+    private func loadVideo(url: URL) {
+        NotificationCenter.default.removeObserver(self)
+        statusObservation?.invalidate()
+
+        playerItem = AVPlayerItem(url: url)
+        player = AVPlayer(playerItem: playerItem)
+
+        player?.volume = 0.0
+        player?.automaticallyWaitsToMinimizeStalling = false
+
+        statusObservation = playerItem?.observe(\.status, options: [.new]) { [weak self] item, _ in
+            DispatchQueue.main.async {
+                if item.status == .readyToPlay {
+                    self?.synchronizePlayback()
+                    self?.stallDetectionTime = nil
+                    self?.retryCount = 0
+                    self?.isSettingUp = false
+                    self?.notifyViewsPlayerReady()
+                } else if item.status == .failed {
+                    self?.handlePlaybackFailure()
+                }
+            }
+        }
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(playerItemStalled),
+            name: .AVPlayerItemPlaybackStalled,
+            object: playerItem
+        )
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(playerItemFailedToPlay),
+            name: .AVPlayerItemFailedToPlayToEndTime,
+            object: playerItem
+        )
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(playerDidFinishPlaying),
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: playerItem
+        )
+
+        player?.play()
     }
 
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setupScreensaver()
+    @objc private func playerItemStalled(_ notification: Notification) {
+        if stallDetectionTime == nil {
+            stallDetectionTime = Date()
+        }
     }
+
+    @objc private func playerItemFailedToPlay(_ notification: Notification) {
+        handlePlaybackFailure()
+    }
+
+    @objc private func playerDidFinishPlaying(_ notification: Notification) {
+        player?.seek(to: .zero)
+        player?.play()
+    }
+
+    private func synchronizePlayback() {
+        guard let player = player, let playerItem = playerItem else { return }
+
+        let streamStartTime: Date
+        if let savedStartTime = defaults.object(forKey: StreamStartTimeKey) as? Date {
+            streamStartTime = savedStartTime
+        } else {
+            let newStartTime = Date()
+            defaults.set(newStartTime, forKey: StreamStartTimeKey)
+            streamStartTime = newStartTime
+        }
+
+        let duration = playerItem.duration
+        if duration.isIndefinite || duration.seconds.isNaN || duration.seconds == 0 {
+            player.play()
+            return
+        }
+
+        let elapsedTime = Date().timeIntervalSince(streamStartTime)
+        let videoDuration = duration.seconds
+        let syncedPosition = elapsedTime.truncatingRemainder(dividingBy: videoDuration)
+
+        player.seek(
+            to: CMTime(seconds: syncedPosition, preferredTimescale: Self.preferredTimescale)
+        ) { [weak self] finished in
+            if finished {
+                self?.player?.play()
+            }
+        }
+    }
+
+    private func handlePlaybackFailure() {
+        guard retryCount < maxRetries else {
+            isSettingUp = false
+            return
+        }
+
+        retryCount += 1
+
+        if let sourceURL = currentSourceURL {
+            let cacheFile = getCacheFilePath(for: sourceURL)
+            try? FileManager.default.removeItem(atPath: cacheFile)
+        }
+        defaults.removeObject(forKey: StreamStartTimeKey)
+
+        let delay = pow(2.0, Double(retryCount - 1))
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.retryPlayback()
+        }
+    }
+
+    private func retryPlayback() {
+        player?.pause()
+        stallDetectionTime = nil
+
+        if let sourceURL = currentSourceURL {
+            if let hlsURL = extractHLSURL(sourceURL), let url = URL(string: hlsURL) {
+                loadVideo(url: url)
+            } else {
+                handlePlaybackFailure()
+            }
+        } else {
+            isSettingUp = false
+            setupPlayer()
+        }
+    }
+
+    func checkStall() {
+        if let stallTime = stallDetectionTime {
+            let stallDuration = Date().timeIntervalSince(stallTime)
+            if stallDuration > stallTimeoutSeconds {
+                handlePlaybackFailure()
+                return
+            }
+        }
+
+        let isPlaying = player?.rate ?? 0 > 0
+        let hasError = player?.error != nil || playerItem?.error != nil
+
+        if hasError {
+            handlePlaybackFailure()
+            return
+        }
+
+        if !isPlaying {
+            if stallDetectionTime == nil {
+                stallDetectionTime = Date()
+            }
+            player?.play()
+        } else {
+            stallDetectionTime = nil
+        }
+    }
+
+    private func cleanup() {
+        NotificationCenter.default.removeObserver(self)
+        statusObservation?.invalidate()
+        player?.pause()
+        player = nil
+        playerItem = nil
+        isSettingUp = false
+        retryCount = 0
+        viewCount = 0
+    }
+
+    // MARK: - URL Extraction helpers
 
     private func md5Hash(_ string: String) -> String {
         let data = Data(string.utf8)
@@ -261,6 +482,42 @@ class LiveScreensaverView: ScreenSaverView {
 
         return extractedURL
     }
+}
+
+// MARK: - LiveScreensaverView
+
+@objc(LiveScreensaverView)
+class LiveScreensaverView: ScreenSaverView {
+
+    private var playerLayer: AVPlayerLayer?
+    private var spinnerLayer: CAShapeLayer?
+    private var startTime = Date()
+
+    private func getSystemIdleTime() -> TimeInterval {
+        return CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .mouseMoved)
+    }
+
+    private func isScreenLocked() -> Bool {
+        guard let sessionDict = CGSessionCopyCurrentDictionary() as? [String: Any] else {
+            return false
+        }
+
+        if let isLocked = sessionDict["CGSSessionScreenIsLocked"] as? Bool {
+            return isLocked
+        }
+
+        return false
+    }
+
+    override init?(frame: NSRect, isPreview: Bool) {
+        super.init(frame: frame, isPreview: isPreview)
+        setupScreensaver()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupScreensaver()
+    }
 
     private func showSpinner() {
         let size: CGFloat = 32
@@ -301,185 +558,48 @@ class LiveScreensaverView: ScreenSaverView {
 
     private func setupScreensaver() {
         animationTimeInterval = 1.0 / 30.0
+        wantsLayer = true
         showSpinner()
 
-        let originalURLString = defaults.string(forKey: URLKey) ?? DefaultURL
+        // Listen for player ready notification
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(onSharedPlayerReady),
+            name: .sharedPlayerReady,
+            object: nil
+        )
 
-        // Check if this is a stream.place URL - convert to HLS URL
-        if isStreamPlaceURL(originalURLString) {
-            if let hlsURL = getStreamPlaceHLSURL(originalURLString) {
-                loadVideo(url: hlsURL)
-            }
-            return
+        // Register with the shared player manager
+        let manager = SharedPlayerManager.shared
+        manager.registerView()
+
+        // If player is already ready (another view already set it up), attach immediately
+        if manager.player != nil {
+            attachPlayerLayer()
         }
-
-        var urlString = originalURLString
-
-        if needsYtDlpExtraction(originalURLString) {
-            currentSourceURL = originalURLString
-
-            if let cachedURL = getCachedHLSURL(for: originalURLString) {
-                urlString = cachedURL
-
-                DispatchQueue.global(qos: .background).async { [weak self] in
-                    _ = self?.extractHLSURL(originalURLString, forceRefresh: true)
-                }
-            } else {
-                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                    if let hlsURL = self?.extractHLSURL(originalURLString) {
-                        DispatchQueue.main.async {
-                            if let url = URL(string: hlsURL) {
-                                self?.loadVideo(url: url)
-                            }
-                        }
-                    }
-                }
-                return
-            }
-        }
-
-        guard let url = URL(string: urlString) else {
-            return
-        }
-
-        loadVideo(url: url)
     }
 
-    private func loadVideo(url: URL) {
-        // Clean up old observers if reloading
-        NotificationCenter.default.removeObserver(self)
-        statusObservation?.invalidate()
+    /// Called by SharedPlayerManager when the player becomes ready
+    @objc private func onSharedPlayerReady() {
+        attachPlayerLayer()
+    }
 
-        playerItem = AVPlayerItem(url: url)
-        player = AVPlayer(playerItem: playerItem)
+    private func attachPlayerLayer() {
+        guard let player = SharedPlayerManager.shared.player else {
+            return
+        }
 
-        player?.volume = 0.0
-        player?.automaticallyWaitsToMinimizeStalling = false
+        // Remove old layer if exists
+        playerLayer?.removeFromSuperlayer()
+
+        hideSpinner()
 
         playerLayer = AVPlayerLayer(player: player)
         playerLayer?.frame = bounds
         playerLayer?.videoGravity = .resizeAspectFill
 
-        wantsLayer = true
-        if let layer = playerLayer {
-            self.layer?.addSublayer(layer)
-        }
-
-        statusObservation = playerItem?.observe(\.status, options: [.new]) { [weak self] item, _ in
-            if item.status == .readyToPlay {
-                self?.hideSpinner()
-                self?.synchronizePlayback()
-                self?.stallDetectionTime = nil
-                self?.retryCount = 0
-            } else if item.status == .failed {
-                self?.handlePlaybackFailure()
-            }
-        }
-
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(playerItemStalled),
-            name: .AVPlayerItemPlaybackStalled,
-            object: playerItem
-        )
-
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(playerItemFailedToPlay),
-            name: .AVPlayerItemFailedToPlayToEndTime,
-            object: playerItem
-        )
-
-        player?.play()
-
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(playerDidFinishPlaying),
-            name: .AVPlayerItemDidPlayToEndTime,
-            object: playerItem
-        )
-    }
-
-    @objc private func playerItemStalled(_ notification: Notification) {
-        if stallDetectionTime == nil {
-            stallDetectionTime = Date()
-        }
-    }
-
-    @objc private func playerItemFailedToPlay(_ notification: Notification) {
-        handlePlaybackFailure()
-    }
-
-    @objc private func playerDidFinishPlaying(_ notification: Notification) {
-        player?.seek(to: .zero)
-        player?.play()
-    }
-
-    private func synchronizePlayback() {
-        guard let player = player, let playerItem = playerItem else { return }
-
-        let streamStartTime: Date
-        if let savedStartTime = defaults.object(forKey: StreamStartTimeKey) as? Date {
-            streamStartTime = savedStartTime
-        } else {
-            let newStartTime = Date()
-            defaults.set(newStartTime, forKey: StreamStartTimeKey)
-            streamStartTime = newStartTime
-        }
-
-        let duration = playerItem.duration
-        if duration.isIndefinite || duration.seconds.isNaN || duration.seconds == 0 {
-            player.play()
-            return
-        }
-
-        let elapsedTime = Date().timeIntervalSince(streamStartTime)
-        let videoDuration = duration.seconds
-
-        let syncedPosition = elapsedTime.truncatingRemainder(dividingBy: videoDuration)
-
-        player.seek(
-            to: CMTime(seconds: syncedPosition, preferredTimescale: Self.preferredTimescale)
-        ) { [weak self] finished in
-            if finished {
-                self?.player?.play()
-            }
-        }
-    }
-
-    private func handlePlaybackFailure() {
-        guard retryCount < maxRetries else {
-            return
-        }
-
-        retryCount += 1
-
-        if let sourceURL = currentSourceURL {
-            let cacheFile = getCacheFilePath(for: sourceURL)
-            try? FileManager.default.removeItem(atPath: cacheFile)
-        }
-        defaults.removeObject(forKey: StreamStartTimeKey)
-
-        let delay = pow(2.0, Double(retryCount - 1))
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            self?.retryPlayback()
-        }
-    }
-
-    private func retryPlayback() {
-        player?.pause()
-        playerLayer?.removeFromSuperlayer()
-
-        stallDetectionTime = nil
-
-        if let sourceURL = currentSourceURL {
-            if let hlsURL = extractHLSURL(sourceURL), let url = URL(string: hlsURL) {
-                loadVideo(url: url)
-            } else {
-                handlePlaybackFailure()
-            }
-        } else {
-            setupScreensaver()
+        if let pLayer = playerLayer, let selfLayer = self.layer {
+            selfLayer.addSublayer(pLayer)
         }
     }
 
@@ -493,40 +613,14 @@ class LiveScreensaverView: ScreenSaverView {
             let idleTime = getSystemIdleTime()
             let screenLocked = isScreenLocked()
             if idleTime < 1.0 && !screenLocked {
-                player?.pause()
-                player?.replaceCurrentItem(with: nil)
                 exit(0)
             }
         }
 
         playerLayer?.frame = bounds
 
-        guard let player = player, let playerItem = playerItem else { return }
-
-        if let stallTime = stallDetectionTime {
-            let stallDuration = Date().timeIntervalSince(stallTime)
-            if stallDuration > stallTimeoutSeconds {
-                handlePlaybackFailure()
-                return
-            }
-        }
-
-        let isPlaying = player.rate > 0
-        let hasError = player.error != nil || playerItem.error != nil
-
-        if hasError {
-            handlePlaybackFailure()
-            return
-        }
-
-        if !isPlaying {
-            if stallDetectionTime == nil {
-                stallDetectionTime = Date()
-            }
-            player.play()
-        } else {
-            stallDetectionTime = nil
-        }
+        // Let the shared manager handle stall detection and recovery
+        SharedPlayerManager.shared.checkStall()
     }
 
     private var configController: ConfigureWindowController?
@@ -540,8 +634,8 @@ class LiveScreensaverView: ScreenSaverView {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
-        statusObservation?.invalidate()
-        player?.pause()
+        playerLayer?.removeFromSuperlayer()
+        SharedPlayerManager.shared.unregisterView()
     }
 }
 
