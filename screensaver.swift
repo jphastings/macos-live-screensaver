@@ -189,11 +189,39 @@ private class SharedPlayerManager {
 
     private static let expirationRegex = try? NSRegularExpression(
         pattern: "expire/([0-9]+)", options: [])
+
+    /// ScreenSaverDefaults needs an explicit synchronize for writes to persist.
+    /// The configuration sheet did this; the playback paths did not, so the
+    /// stream start time could silently fail to be written -- taking
+    /// multi-display sync and the retry reset with it.
+    private func writeDefault(_ value: Any?, forKey key: String) {
+        if let value = value {
+            defaults.set(value, forKey: key)
+        } else {
+            defaults.removeObject(forKey: key)
+        }
+        defaults.synchronize()
+    }
     private static let preferredTimescale: CMTimeScale = 600
 
     private init() {}
 
+    // MARK: - Threading contract
+    //
+    // Every property of this class is read and written on the main queue only.
+    // The blocking work -- yt-dlp, and the cache and lock files it touches --
+    // runs on background queues, but those blocks operate on locals and hop back
+    // to main before touching any state here.
+    //
+    // registerView/unregisterView are the two entry points that can arrive from
+    // elsewhere (a view's deinit is not guaranteed to be on the main thread), so
+    // they bounce themselves onto it.
+
     func registerView() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.registerView() }
+            return
+        }
         viewCount += 1
         Log.player.debug("View registered (\(self.viewCount) attached)")
         if viewCount == 1 && player == nil && !isSettingUp {
@@ -202,6 +230,10 @@ private class SharedPlayerManager {
     }
 
     func unregisterView() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.unregisterView() }
+            return
+        }
         viewCount -= 1
         Log.player.debug("View unregistered (\(self.viewCount) attached)")
         if viewCount <= 0 {
@@ -368,8 +400,10 @@ private class SharedPlayerManager {
     }
 
     @objc private func playerDidFinishPlaying(_ notification: Notification) {
-        player?.seek(to: .zero)
-        player?.play()
+        // Restart through the same synchronisation used on first load. A plain
+        // seek to zero ignored StreamStartTime, so displays that were aligned
+        // when playback started drifted apart after the first loop.
+        synchronizePlayback()
     }
 
     private func synchronizePlayback() {
@@ -380,7 +414,7 @@ private class SharedPlayerManager {
             streamStartTime = savedStartTime
         } else {
             let newStartTime = Date()
-            defaults.set(newStartTime, forKey: StreamStartTimeKey)
+            writeDefault(newStartTime, forKey: StreamStartTimeKey)
             streamStartTime = newStartTime
         }
 
@@ -429,7 +463,7 @@ private class SharedPlayerManager {
             let cacheFile = getCacheFilePath(for: sourceURL)
             try? FileManager.default.removeItem(atPath: cacheFile)
         }
-        defaults.removeObject(forKey: StreamStartTimeKey)
+        writeDefault(nil, forKey: StreamStartTimeKey)
 
         let delay = pow(2.0, Double(retryCount - 1))
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
@@ -603,44 +637,52 @@ private class SharedPlayerManager {
             "screensaver_\(hash)_lock")
     }
 
+    /// Takes the extraction lock, or reports that someone else holds it.
+    ///
+    /// `O_CREAT | O_EXCL` creates the file only if it does not already exist,
+    /// and the kernel makes that test-and-create atomic. The previous
+    /// check-then-create left a window in which two processes could both decide
+    /// the lock was free and both spawn yt-dlp.
+    private func acquireExtractionLock(at path: String) -> Bool {
+        let descriptor = open(path, O_CREAT | O_EXCL | O_WRONLY, 0o644)
+        guard descriptor >= 0 else { return false }
+        close(descriptor)
+        return true
+    }
+
+    /// Removes a lock left behind by an extraction that crashed or was killed.
+    private func clearStaleExtractionLock(at path: String) {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+            let lockTimestamp = attributes[.modificationDate] as? Date,
+            Date().timeIntervalSince(lockTimestamp) >= extractionTimeoutSeconds
+        else {
+            return
+        }
+        Log.extraction.notice("Clearing stale extraction lock")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
     private func extractHLSURL(_ sourceURL: String, forceRefresh: Bool = false) -> String? {
         if !forceRefresh, let cachedURL = getCachedHLSURL(for: sourceURL) {
             return cachedURL
         }
 
         let lockFile = getExtractionLockPath(for: sourceURL)
+        clearStaleExtractionLock(at: lockFile)
 
-        if FileManager.default.fileExists(atPath: lockFile) {
-            do {
-                let attributes = try FileManager.default.attributesOfItem(atPath: lockFile)
-                if let lockTimestamp = attributes[.modificationDate] as? Date {
-                    let lockAge = Date().timeIntervalSince(lockTimestamp)
-
-                    if lockAge < extractionTimeoutSeconds {
-                        return nil
-                    } else {
-                        try? FileManager.default.removeItem(atPath: lockFile)
-                    }
-                }
-            } catch {
-                Log.extraction.error(
-                    "Failed to read lock file attributes: \(error.localizedDescription, privacy: .public)")
-            }
+        guard acquireExtractionLock(at: lockFile) else {
+            Log.extraction.debug("Extraction already in progress for this URL; skipping")
+            return nil
         }
-
-        do {
-            try "".write(toFile: lockFile, atomically: true, encoding: .utf8)
-        } catch {
-            Log.extraction.error("Failed to create lock file: \(error.localizedDescription, privacy: .public)")
-        }
-
-        let task = Process()
+        // One release point for every exit path below, including the throwing
+        // ones. The old code released it in two places and missed a third.
+        defer { try? FileManager.default.removeItem(atPath: lockFile) }
 
         guard let executablePath = findYtDlpPath() else {
-            try? FileManager.default.removeItem(atPath: lockFile)
             return nil
         }
 
+        let task = Process()
         task.executableURL = URL(fileURLWithPath: executablePath)
         task.arguments = ["-g", sourceURL]
 
@@ -680,8 +722,6 @@ private class SharedPlayerManager {
         } catch {
             Log.extraction.error("yt-dlp failed to launch: \(error.localizedDescription, privacy: .public)")
         }
-
-        try? FileManager.default.removeItem(atPath: lockFile)
 
         return extractedURL
     }
