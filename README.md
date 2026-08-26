@@ -20,16 +20,38 @@ Turn any live stream into your screensaver/lockscreen. Some examples:
 
 ## Requirements
 
-- macOS
-- Swift compiler (Xcode Command Line Tools)
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) (optional, for YouTube support)
-- [ffmpeg](https://ffmpeg.org/) (optional, required alongside yt-dlp for YouTube support)
+- **macOS 13 (Ventura) or later**, Apple Silicon or Intel
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [ffmpeg](https://ffmpeg.org/) — only
+  needed for YouTube streams; direct HLS and stream.place URLs work without them
 
-**Disclaimer**: This project was entirely vibe-coded. I've never written Swift before in my life.
+Building from source additionally needs the Swift compiler (Xcode Command Line Tools).
 
-**Note**: This was tested exclusively on macOS Tahoe on an M2 MacBook. Your mileage may vary on other versions/hardware.
+**Disclaimer**: This project was largely vibe-coded — the author had never written Swift
+before starting it.
 
 ## Installation
+
+### Install (recommended)
+
+1. Download `LiveScreensaver-<version>.zip` from the
+   [latest release](https://github.com/jphastings/macos-live-screensaver/releases/latest).
+2. Unzip it and double-click `LiveScreensaver.saver`.
+3. macOS will offer to install it. Choose whether to install for just you or all users.
+
+Releases are signed with a Developer ID certificate and notarised by Apple, so they open
+without a Gatekeeper warning.
+
+<details>
+<summary>Seeing "cannot be opened because the developer cannot be verified"?</summary>
+
+That means you have a build that was not notarised — most likely one you built yourself,
+or a release from before notarisation was set up. Either build it from source (below), or
+download a current release. As a last resort you can clear the quarantine flag yourself:
+
+```bash
+xattr -dr com.apple.quarantine ~/Library/Screen\ Savers/LiveScreensaver.saver
+```
+</details>
 
 ### Install yt-dlp and ffmpeg (for YouTube support)
 
@@ -44,9 +66,8 @@ pip install yt-dlp
 brew install ffmpeg
 ```
 
-### Build and Install
+### Build from source
 
-Build and install:
 ```bash
 make install
 ```
@@ -57,16 +78,29 @@ make build
 open build/LiveScreensaver.saver
 ```
 
+A local build is ad-hoc signed, which is fine on the machine that built it.
+
 Other commands:
 ```bash
-make clean      # Remove build directory
+make test       # Run the unit tests
+make verify     # Check the built bundle is well-formed
+make lint       # Check formatting (needs: brew install swift-format)
+make format     # Reformat in place
+make clean      # Remove build artefacts
 make uninstall  # Remove screensaver from ~/Library/Screen Savers/
 make start      # Trigger screensaver immediately
 ```
 
+Build for a single architecture, or a different minimum OS, by overriding the defaults:
+
+```bash
+make build ARCHS=arm64 MACOS_MIN=14.0
+```
+
 ## Usage
 
-1. Open **System Preferences** → **Screen Saver**
+1. Open **System Settings** → **Screen Saver** (**System Preferences** on macOS 12 and
+   earlier)
 2. Select **Live Screensaver**
 3. Click **Options** to configure
 4. Enter a video URL:
@@ -74,17 +108,18 @@ make start      # Trigger screensaver immediately
    - HLS stream: `https://example.com/stream.m3u8`
    - stream.place: `https://stream.place/byjp.me`
 
-**Note**: URLs must be `https://`. macOS App Transport Security blocks plain `http://`
-connections, so an `http://` stream could never play even though older versions accepted
-it in the settings sheet.
-
-**Note**: Only live YouTube videos are supported. Regular (non-live) YouTube videos will not work.
+The settings sheet checks the URL as you type and will not let you save one it cannot
+reach, so most mistakes are caught before you leave the sheet.
 
 <img width="526" height="587" alt="Image" src="https://github.com/user-attachments/assets/67d314ff-e17e-43bc-baed-df20c9ece80b" />
 
-**Note**: older versions could make System Settings' Options button stop responding. The
-preview instance was quitting its host process a couple of seconds after appearing; it no
-longer runs the screensaver's idle-detection logic. If you still see it, please open an issue.
+Two constraints worth knowing:
+
+- **Only live YouTube videos work.** Regular (non-live) YouTube videos will not play.
+- **URLs must be `https://`.** macOS App Transport Security blocks plain `http://`
+  connections, so an `http://` stream could never play — earlier versions accepted them
+  in the settings sheet and then failed silently at playback.
+
 ## Maintainer: release signing
 
 Releases are signed with a **Developer ID Application** certificate and notarised by
@@ -157,13 +192,41 @@ subprocess, and reading executables out of `/opt/homebrew/bin`.
 Developer ID plus notarisation gives the same practical outcome — a double-clickable
 install with no scary warnings — which is what the App Store was wanted for.
 
+## Contributing
+
+```bash
+make test    # unit tests for the pure logic in Sources/LiveScreensaverCore
+make lint    # formatting (brew install swift-format)
+make build   # compile and assemble the bundle
+```
+
+Run those three before opening a pull request; CI runs the same checks.
+
+Logic that does not depend on AppKit belongs in `Sources/LiveScreensaverCore/`, which is
+the part that can be unit tested. `Screensaver/` holds the AppKit and ScreenSaver layer,
+which needs a screensaver host to run at all.
+
 ## Troubleshooting
 
-**YouTube videos don't play**:
-- Make sure yt-dlp and ffmpeg are installed and in your PATH
-- Verify you're using a **live** YouTube stream - regular videos are not supported
+The screensaver tells you what went wrong. When a stream cannot be played you get a
+bouncing **Unable to stream** notice with the reason underneath, rather than a black
+screen. The table below covers what each reason means.
 
-**Black screen/constant loading spinner**: Wait a few seconds for loading, or try a different URL
+| On screen | What to do |
+| --- | --- |
+| `YouTube streams need yt-dlp…` | `brew install yt-dlp ffmpeg` |
+| `Found yt-dlp, but other users can modify it…` | The binary is group- or world-writable, so it is not trusted. `chmod go-w` the file, or reinstall it with Homebrew. |
+| `The stream is offline or has ended.` | Check the stream is live. Only **live** YouTube videos work; regular videos are not supported. |
+| `Couldn't read the stream address for this URL.` | Usually an out-of-date yt-dlp — `brew upgrade yt-dlp`. |
+| `That URL doesn't look like a stream.` | Re-check the URL in Options. |
+| `The stream kept dropping out.` | The source is having problems; try again later. |
+| `No internet connection.` | As it says. |
+
+**A spinner that never resolves** means the stream is still being resolved — YouTube
+extraction can take several seconds on first use. If it persists, check the logs below.
+
+**Options button unresponsive**: fixed in recent versions. If you still see it, please
+open an issue with the logs below.
 
 ### Collecting logs
 
