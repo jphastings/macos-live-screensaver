@@ -2,8 +2,14 @@ name: Build and Release
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - 'v*'
+  # Manual escape hatch for re-running a release without moving a tag.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build, without the leading v (e.g. 1.2.0)'
+        required: true
 
 jobs:
   build-and-release:
@@ -14,6 +20,26 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0   # release notes need the previous tag
+
+    # The tag is the version. Strip the leading "v" so it can go straight into
+    # CFBundleShortVersionString, which must be a plain dotted number.
+    - name: Determine version
+      id: version
+      run: |
+        set -euo pipefail
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          VERSION="${{ inputs.version }}"
+        else
+          VERSION="${GITHUB_REF_NAME#v}"
+        fi
+        if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+          echo "::error::Version '$VERSION' is not X.Y.Z - tag releases as vX.Y.Z"
+          exit 1
+        fi
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        echo "Building version $VERSION"
 
     # Signing only engages when the secrets are present, so a fork -- which has
     # none of them -- still gets a working (ad-hoc, unnotarised) build rather
@@ -60,10 +86,14 @@ jobs:
     - name: Build screensaver
       env:
         SIGN_IDENTITY: ${{ steps.creds.outputs.signed == 'true' && secrets.MACOS_SIGNING_IDENTITY || '-' }}
-      run: make build SIGN_IDENTITY="$SIGN_IDENTITY"
+      run: |
+        make build \
+          SIGN_IDENTITY="$SIGN_IDENTITY" \
+          VERSION="${{ steps.version.outputs.version }}" \
+          BUILD_NUMBER="${{ github.run_number }}"
 
     - name: Verify build output
-      run: make verify
+      run: make verify VERSION="${{ steps.version.outputs.version }}"
 
     - name: Notarize and staple
       if: steps.creds.outputs.signed == 'true'
@@ -91,15 +121,20 @@ jobs:
 
     # ditto preserves the bundle's signature and extended attributes; `zip` does
     # not, and would invalidate the signature we just applied.
+    # The artefact carries its version, so a downloaded file is identifiable
+    # long after it has left the release page.
     - name: Create ZIP archive
-      run: ditto -c -k --keepParent build/LiveScreensaver.saver LiveScreensaver.saver.zip
+      run: |
+        ditto -c -k --keepParent build/LiveScreensaver.saver \
+          "LiveScreensaver-${{ steps.version.outputs.version }}.zip"
 
-    - name: Update Release
+    - name: Publish release
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: latest
-        name: Latest Build
-        files: LiveScreensaver.saver.zip
+        tag_name: v${{ steps.version.outputs.version }}
+        name: v${{ steps.version.outputs.version }}
+        files: LiveScreensaver-${{ steps.version.outputs.version }}.zip
+        generate_release_notes: true
         draft: false
         prerelease: false
       env:

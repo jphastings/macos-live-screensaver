@@ -122,6 +122,24 @@ make assess     # what Gatekeeper will decide on a user's machine
 
 `make build` on its own ad-hoc signs, which is all you need for local testing.
 
+### Cutting a release
+
+Releases are triggered by pushing a tag, not by merging to `main`. The tag *is* the
+version — it is stamped into `CFBundleShortVersionString`, so a user can always tell
+you exactly which build they are running.
+
+```bash
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+The workflow validates the tag is `vX.Y.Z`, builds and signs it, notarises, and
+publishes a release with generated notes and a versioned artefact
+(`LiveScreensaver-1.2.0.zip`).
+
+`workflow_dispatch` is available as an escape hatch to re-run a release without moving
+a tag — useful if notarisation fails for a transient reason.
+
 ### Why not the Mac App Store?
 
 A `.saver` bundle cannot be distributed through the Mac App Store. The store ships
