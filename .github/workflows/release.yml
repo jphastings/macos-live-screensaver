@@ -19,13 +19,7 @@ jobs:
       run: make build
 
     - name: Verify build output
-      run: |
-        if [ ! -d "build/LiveScreensaver.saver" ]; then
-          echo "Build failed: LiveScreensaver.saver not found"
-          exit 1
-        fi
-        echo "Build successful"
-        ls -la build/
+      run: make verify
 
     - name: Create ZIP archive
       run: |
