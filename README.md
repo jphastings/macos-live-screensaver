@@ -160,3 +160,24 @@ install with no scary warnings — which is what the App Store was wanted for.
 - Verify you're using a **live** YouTube stream - regular videos are not supported
 
 **Black screen/constant loading spinner**: Wait a few seconds for loading, or try a different URL
+
+### Collecting logs
+
+A screensaver quits the moment you touch the machine, so it cannot be debugged
+interactively. It logs to the unified logging system instead. To see what it did:
+
+```bash
+log show --predicate 'subsystem == "me.byjp.livescreensaver"' --last 30m --info
+```
+
+Or live, while reproducing the problem from another machine or an SSH session:
+
+```bash
+log stream --predicate 'subsystem == "me.byjp.livescreensaver"' --info --debug
+```
+
+In Console.app, search for `me.byjp.livescreensaver` and enable **Action → Include
+Info Messages**.
+
+Stream URLs are logged with their query strings redacted, since those often carry
+signed tokens — the output is safe to paste into an issue.

@@ -1,11 +1,11 @@
 ---
 # SAVE-1lr9
 title: Replace NSLog with structured os.Logger logging
-status: todo
+status: completed
 type: task
 priority: normal
 created_at: 2026-08-26T07:09:14Z
-updated_at: 2026-08-26T07:09:14Z
+updated_at: 2026-08-26T07:25:42Z
 parent: SAVE-61nt
 ---
 
@@ -30,8 +30,32 @@ Use privacy annotations deliberately: stream URLs can contain signed tokens, so 
 
 ## Tasks
 
-- [ ] Replace `NSLog` with `os.Logger`, one logger per category
-- [ ] Log: chosen source URL, cache hit/miss, extraction start/result/duration, yt-dlp path + version
-- [ ] Log: player status transitions, each retry with its attempt number and delay, terminal failure
-- [ ] Redact query strings from logged URLs
-- [ ] Add a Troubleshooting section to the README telling users how to collect logs
+- [x] Replace `NSLog` with `os.Logger`, one logger per category
+- [x] Log: chosen source URL, cache hit/miss, extraction start/result/duration, yt-dlp path + version
+- [x] Log: player status transitions, each retry with its attempt number and delay, terminal failure
+- [x] Redact query strings from logged URLs
+- [x] Add a Troubleshooting section to the README telling users how to collect logs
+
+## Summary of Changes
+
+All four `NSLog` calls replaced with `os.Logger` under the subsystem `me.byjp.livescreensaver`, split into three categories: `player`, `extraction` and `config`.
+
+Logging added at every state transition that previously happened silently:
+
+- **player** — setup starting (with the configured URL), player ready, each retry with its attempt number and computed delay, and the terminal give-up with its reason. View register/unregister at `.debug`, so multi-monitor behaviour is legible.
+- **extraction** — cache hit vs. miss, the selected yt-dlp path *and version*, extraction duration, and yt-dlp's exit status when it produces no URL.
+- **config** — the URL the user saved.
+
+### Privacy
+
+`Log.redact(_:)` strips query strings and fragments before any URL is logged. Extracted stream URLs routinely carry signed tokens and expiry signatures — enough to identify the stream is useful, enough to hand over someone's credentials in a bug report is not. Everything else is marked `.public` explicitly, since `os.Logger` redacts interpolated non-static strings by default and a log full of `<private>` helps nobody.
+
+### yt-dlp version
+
+Resolved once per process by a lazily-initialised global. yt-dlp breaks against YouTube often enough that "which version" is the first useful question about a broken stream, and this means the answer is already in the log rather than something the user has to be asked for.
+
+### Nothing on the hot path
+
+`animateOneFrame` runs 30 times a second per display and gained no logging at all. The only frequently-reachable call sites are `.debug` level.
+
+The README gained a "Collecting logs" section with the `log show` and `log stream` predicates and the Console.app equivalent.
