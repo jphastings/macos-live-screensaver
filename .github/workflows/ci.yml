@@ -32,6 +32,9 @@ jobs:
       - name: Verify bundle structure
         run: make verify
 
+      - name: Run unit tests
+        run: make test
+
   format:
     name: Format
     runs-on: macos-latest

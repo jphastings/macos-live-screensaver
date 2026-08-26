@@ -1,4 +1,4 @@
-.PHONY: build install clean uninstall start verify lint format notarize assess
+.PHONY: build install clean uninstall start verify test lint format notarize assess
 
 SCREENSAVER_NAME = LiveScreensaver.saver
 INSTALL_DIR = $(HOME)/Library/Screen\ Savers
@@ -28,7 +28,12 @@ SIGN_IDENTITY ?= -
 SWIFT_FLAGS = -emit-library -module-name LiveScreensaver \
 	-framework ScreenSaver -framework AVFoundation \
 	-framework Cocoa -framework Quartz
-SOURCES = screensaver.swift
+# The .saver is built as a single module from both directories: the pure logic
+# that SwiftPM also builds and tests on its own, plus the AppKit layer that can
+# only run inside a screensaver host.
+CORE_SOURCES = $(wildcard Sources/LiveScreensaverCore/*.swift)
+APP_SOURCES = $(wildcard Screensaver/*.swift)
+SOURCES = $(CORE_SOURCES) $(APP_SOURCES)
 
 build:
 	rm -rf $(BUILD_DIR)/$(SCREENSAVER_NAME) $(BUILD_DIR)/slices
@@ -115,6 +120,9 @@ notarize:
 assess:
 	spctl -a -vvv -t install $(BUILD_DIR)/$(SCREENSAVER_NAME)
 
+test:
+	swift test
+
 lint:
 	swift-format lint --strict --recursive .
 
@@ -122,7 +130,7 @@ format:
 	swift-format format --in-place --recursive .
 
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -rf $(BUILD_DIR) .build
 
 uninstall:
 	rm -rf $(INSTALL_DIR)/$(SCREENSAVER_NAME)
