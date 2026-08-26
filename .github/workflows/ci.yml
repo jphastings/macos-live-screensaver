@@ -35,10 +35,6 @@ jobs:
   format:
     name: Format
     runs-on: macos-latest
-    # Advisory until the existing sources have been run through the formatter
-    # once on a macOS machine (`make format`). Flip to blocking after that —
-    # tracked in SAVE-hrpq.
-    continue-on-error: true
 
     steps:
       - name: Checkout code
@@ -47,5 +43,22 @@ jobs:
       - name: Install swift-format
         run: brew install swift-format
 
-      - name: Check formatting
-        run: make lint
+      # Advisory, because the existing sources have never been through the
+      # formatter and doing that is one `make format` run on a machine with the
+      # toolchain. Findings are surfaced as annotations rather than failing every
+      # pull request over pre-existing style.
+      #
+      # Note: `continue-on-error` is NOT the way to do this. It stops the run
+      # being marked failed, but the check itself still reports failure, so every
+      # PR shows a red cross for a job that is working as intended.
+      #
+      # Once the tree is clean, replace this whole step with `run: make lint`.
+      # Tracked in SAVE-hrpq.
+      - name: Check formatting (advisory)
+        run: |
+          if make lint > lint.log 2>&1; then
+            echo "Formatting is clean."
+          else
+            echo "::warning::swift-format found formatting differences. Run 'make format' locally to fix them."
+            cat lint.log
+          fi
