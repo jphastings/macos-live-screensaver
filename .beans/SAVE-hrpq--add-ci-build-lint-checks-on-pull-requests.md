@@ -34,6 +34,23 @@ Added `.github/workflows/ci.yml` with two jobs, running on every pull request an
 
 The format job is `continue-on-error: true` for now. `screensaver.swift` was not written by a formatter throughout — the spinner path construction around lines 531-539 uses manual continuation alignment that `swift-format` will rewrite — so making the check blocking immediately would put every subsequent PR red on a pre-existing issue.
 
-- [ ] Run `make format` on a macOS machine, commit the result, then remove `continue-on-error` from the format job
+- [ ] Run `make format` on a macOS machine, commit the result
+- [ ] Then replace the advisory step with a plain `run: make lint`
 
 Left undone deliberately rather than guessed at: reformatting 1,100 lines without being able to run the formatter would produce an unreviewable diff.
+
+### What CI actually reported
+
+The advisory job did its job on the first run. Findings, across the tree:
+
+- `LineLength` — the majority, including several lines added by later beans in this stack
+- `Spacing` — `size/2` and similar in the spinner path construction, which wants `size / 2`
+- `Indentation`, `AddLines`, `RemoveLine`, `TrailingWhitespace` — a handful each
+
+All of it is mechanical; `swift-format format --in-place` resolves the lot.
+
+### Correction: `continue-on-error` was the wrong mechanism
+
+The job was first written with `continue-on-error: true` on the assumption that it would keep the job advisory. It does not. It stops the *workflow run* being marked failed, but the **check run still reports `failure`**, so every pull request in the stack showed a red cross for a job behaving exactly as designed — which is worse than useless, because it trains you to ignore CI.
+
+Replaced with an explicit conditional in the step: run `make lint`, and on findings emit a `::warning::` annotation and print the log, exiting zero. The job now passes, the findings are still visible in the run and as an annotation, and a genuine build failure is the only thing that shows red.
