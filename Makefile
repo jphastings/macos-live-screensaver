@@ -11,18 +11,36 @@ VERSION ?= 0.0.0
 # Monotonic build number. Release CI passes the run number.
 BUILD_NUMBER ?= 0
 
+# Architectures to build and merge into the shipped binary. Without an explicit
+# -target, swiftc emits a single slice for whatever the build machine happens to
+# be -- which on CI means Apple Silicon only, silently excluding every Intel Mac.
+ARCHS ?= arm64 x86_64
+# Minimum macOS. Must stay in step with LSMinimumSystemVersion in Info.plist.
+# Without this the deployment target is whatever SDK the build machine has, so a
+# runner image upgrade would raise the minimum OS without anyone noticing.
+MACOS_MIN ?= 13.0
+
+SWIFT_FLAGS = -emit-library -module-name LiveScreensaver \
+	-framework ScreenSaver -framework AVFoundation \
+	-framework Cocoa -framework Quartz
+SOURCES = screensaver.swift
+
 build:
-	rm -rf $(BUILD_DIR)/$(SCREENSAVER_NAME)
+	rm -rf $(BUILD_DIR)/$(SCREENSAVER_NAME) $(BUILD_DIR)/slices
 	mkdir -p $(BUILD_DIR)/$(SCREENSAVER_NAME)/Contents/MacOS
 	mkdir -p $(BUILD_DIR)/$(SCREENSAVER_NAME)/Contents/Resources
-	swiftc -emit-library \
-		-o $(BUILD_DIR)/$(SCREENSAVER_NAME)/Contents/MacOS/LiveScreensaver \
-		-module-name LiveScreensaver \
-		-framework ScreenSaver \
-		-framework AVFoundation \
-		-framework Cocoa \
-		-framework Quartz \
-		screensaver.swift
+	mkdir -p $(BUILD_DIR)/slices
+	@set -e; for arch in $(ARCHS); do \
+		echo "Compiling $$arch slice (macOS $(MACOS_MIN) minimum)"; \
+		swiftc $(SWIFT_FLAGS) \
+			-target $$arch-apple-macos$(MACOS_MIN) \
+			-o $(BUILD_DIR)/slices/LiveScreensaver-$$arch \
+			$(SOURCES); \
+	done
+	lipo -create -output \
+		$(BUILD_DIR)/$(SCREENSAVER_NAME)/Contents/MacOS/LiveScreensaver \
+		$(foreach arch,$(ARCHS),$(BUILD_DIR)/slices/LiveScreensaver-$(arch))
+	rm -rf $(BUILD_DIR)/slices
 	cp Info.plist $(BUILD_DIR)/$(SCREENSAVER_NAME)/Contents/Info.plist
 	plutil -replace CFBundleShortVersionString -string "$(VERSION)" \
 		$(BUILD_DIR)/$(SCREENSAVER_NAME)/Contents/Info.plist
@@ -48,6 +66,13 @@ verify:
 		|| { echo "NSPrincipalClass is not LiveScreensaverView"; exit 1; }; \
 	test "$$(plutil -extract CFBundleShortVersionString raw "$$bundle/Contents/Info.plist")" = "$(VERSION)" \
 		|| { echo "version was not stamped into Info.plist"; exit 1; }; \
+	test "$$(plutil -extract LSMinimumSystemVersion raw "$$bundle/Contents/Info.plist")" = "$(MACOS_MIN)" \
+		|| { echo "LSMinimumSystemVersion does not match MACOS_MIN ($(MACOS_MIN))"; exit 1; }; \
+	for arch in $(ARCHS); do \
+		lipo -archs "$$bundle/Contents/MacOS/LiveScreensaver" | grep -qw "$$arch" \
+			|| { echo "missing architecture: $$arch"; exit 1; }; \
+	done; \
+	echo "Architectures: $$(lipo -archs "$$bundle/Contents/MacOS/LiveScreensaver")"; \
 	codesign --verify --verbose "$$bundle"; \
 	echo "Bundle verified"
 
