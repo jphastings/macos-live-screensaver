@@ -1,11 +1,11 @@
 ---
 # SAVE-5e1q
 title: Network and subprocess hardening (ATS, HLS check, yt-dlp)
-status: todo
+status: completed
 type: task
 priority: normal
 created_at: 2026-08-26T07:08:35Z
-updated_at: 2026-08-26T07:08:35Z
+updated_at: 2026-08-26T07:30:03Z
 parent: SAVE-5ucd
 ---
 
@@ -48,8 +48,38 @@ There is no timeout on the `waitUntilExit()` in `extractHLSURL` — the 15 s `ex
 
 ## Tasks
 
-- [ ] Require HTTPS in validation, or add a documented, narrow ATS exception
-- [ ] Verify the fetched manifest looks like HLS (`#EXTM3U`), not just 2xx
-- [ ] Check ownership/permissions of the yt-dlp binary before executing
-- [ ] Enforce a real timeout on the yt-dlp process and terminate it on expiry
-- [ ] Log the selected yt-dlp path and version
+- [x] Require HTTPS in validation, or add a documented, narrow ATS exception
+- [x] Verify the fetched manifest looks like HLS (`#EXTM3U`), not just 2xx
+- [x] Check ownership/permissions of the yt-dlp binary before executing
+- [x] Enforce a real timeout on the yt-dlp process and terminate it on expiry
+- [x] Log the selected yt-dlp path and version
+
+## Summary of Changes
+
+### HTTPS is now required, rather than accepted and then blocked
+
+Validation accepted `http://` with a green tick, and App Transport Security then blocked it at playback — the worst outcome, because the user had been told it was fine. Plain HTTP is now rejected up front with a message explaining why.
+
+A narrow ATS exception was considered and rejected: it would have to cover arbitrary user-supplied hosts, which means `NSAllowsArbitraryLoads`, weakening every connection the bundle makes. Requiring HTTPS costs almost nothing — YouTube, stream.place and every CDN serving HLS are HTTPS already — and the only real loss is a plain-HTTP stream on a LAN, which is worth trading for not shipping a blanket exception. Documented in the README.
+
+### A 2xx response is no longer taken as proof of a stream
+
+`validateHLSURL` checked only the status code, so a captive portal or a site's custom 404 page answering 200 with HTML passed. It now checks the body begins with `#EXTM3U` — the ranged request already asks for exactly the bytes that would contain it, so this costs nothing extra.
+
+### yt-dlp is checked before it is executed
+
+`isSafeToExecute(_:)` refuses any candidate that is group- or world-writable, or owned by someone other than root or the current user. Two of the four searched locations (`/usr/local/bin`, `~/.local/bin`) are writable without admin rights on a default install, and this process runs in a system context.
+
+A rejected binary is reported distinctly from a missing one — "Found yt-dlp, but other users can modify it, so it wasn't run" rather than "install yt-dlp", which would send someone off to reinstall a binary that is already there.
+
+Argument handling was already correct: arguments go through an array, not a shell, so there was never an injection path from the URL.
+
+### Both yt-dlp invocations now have real timeouts
+
+`extractionTimeoutSeconds` only ever governed how long a *lock file* was considered fresh; nothing bounded the process. A hung yt-dlp hung the extraction thread indefinitely, and in the settings sheet left the spinner going forever with OK disabled.
+
+Both call sites now schedule a `DispatchWorkItem` that terminates the process on expiry, cancelled on normal completion. The sheet reports a termination-by-signal as a timeout rather than a generic "could not load video".
+
+### A latent deadlock fixed on the way past
+
+The extraction path called `waitUntilExit()` and *then* drained the pipe. A child that fills the 64 KB pipe buffer blocks until someone reads it, so that ordering can deadlock — it only worked because `yt-dlp -g` output is short. It now closes the parent's write end and drains before waiting.

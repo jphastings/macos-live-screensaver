@@ -74,6 +74,10 @@ make start      # Trigger screensaver immediately
    - HLS stream: `https://example.com/stream.m3u8`
    - stream.place: `https://stream.place/byjp.me`
 
+**Note**: URLs must be `https://`. macOS App Transport Security blocks plain `http://`
+connections, so an `http://` stream could never play even though older versions accepted
+it in the settings sheet.
+
 **Note**: Only live YouTube videos are supported. Regular (non-live) YouTube videos will not work.
 
 <img width="526" height="587" alt="Image" src="https://github.com/user-attachments/assets/67d314ff-e17e-43bc-baed-df20c9ece80b" />

@@ -51,8 +51,40 @@ private let ytdlpPaths = [
     (NSHomeDirectory() as NSString).appendingPathComponent(".local/bin/yt-dlp"),
 ]
 
+/// Whether a binary is safe for a screensaver to execute.
+///
+/// Two of the searched locations are writable without admin rights on a default
+/// install (`/usr/local/bin`, `~/.local/bin`). Anything group- or world-writable
+/// can be swapped by another account for something this process would then run,
+/// so refuse it rather than execute it.
+private func isSafeToExecute(_ path: String) -> Bool {
+    guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+        let permissions = (attributes[.posixPermissions] as? NSNumber)?.uint16Value,
+        let owner = (attributes[.ownerAccountID] as? NSNumber)?.uint32Value
+    else {
+        return false
+    }
+    // Owned by root, or by whoever is running the screensaver.
+    guard owner == 0 || owner == getuid() else { return false }
+    // Not writable by group or other.
+    return permissions & 0o022 == 0
+}
+
+/// Whether a yt-dlp exists at all, regardless of whether it is safe to run.
+/// Lets the failure be reported as "unsafe" rather than "not installed".
+private func ytDlpIsInstalled() -> Bool {
+    return ytdlpPaths.contains { FileManager.default.isExecutableFile(atPath: $0) }
+}
+
 private func findYtDlpPath() -> String? {
-    return ytdlpPaths.first { FileManager.default.isExecutableFile(atPath: $0) }
+    for path in ytdlpPaths where FileManager.default.isExecutableFile(atPath: path) {
+        if isSafeToExecute(path) {
+            return path
+        }
+        Log.extraction.error(
+            "Refusing to run \(path, privacy: .public): writable by group or other")
+    }
+    return nil
 }
 
 /// Looked up once per process. yt-dlp breaks against YouTube often enough that
@@ -129,6 +161,7 @@ private extension Notification.Name {
 /// say anything is the screensaver itself.
 enum StreamError {
     case ytDlpMissing
+    case ytDlpUnsafe
     case extractionFailed
     case invalidConfiguredURL
     case streamUnavailable
@@ -139,6 +172,8 @@ enum StreamError {
         switch self {
         case .ytDlpMissing:
             return "YouTube streams need yt-dlp. Install it with: brew install yt-dlp"
+        case .ytDlpUnsafe:
+            return "Found yt-dlp, but other users can modify it, so it wasn't run."
         case .extractionFailed:
             return "Couldn't read the stream address for this URL."
         case .invalidConfiguredURL:
@@ -285,8 +320,12 @@ private class SharedPlayerManager {
             // Retrying will not conjure up a missing binary, so say so straight
             // away rather than spending the retry budget first.
             guard let ytDlp = findYtDlpPath() else {
-                Log.extraction.error("yt-dlp not found in any known location")
-                failPermanently(with: .ytDlpMissing)
+                if ytDlpIsInstalled() {
+                    failPermanently(with: .ytDlpUnsafe)
+                } else {
+                    Log.extraction.error("yt-dlp not found in any known location")
+                    failPermanently(with: .ytDlpMissing)
+                }
                 return
             }
             Log.extraction.info(
@@ -695,11 +734,27 @@ private class SharedPlayerManager {
 
         do {
             try task.run()
-            task.waitUntilExit()
 
+            // Process has no timeout of its own, and yt-dlp will sit there
+            // indefinitely against a stalled network. extractionTimeoutSeconds
+            // previously governed only how long a lock file was considered
+            // fresh -- nothing bounded the process itself.
+            let timeout = DispatchWorkItem {
+                guard task.isRunning else { return }
+                Log.extraction.error(
+                    "yt-dlp exceeded \(self.extractionTimeoutSeconds, privacy: .public)s; terminating")
+                task.terminate()
+            }
+            DispatchQueue.global(qos: .utility).asyncAfter(
+                deadline: .now() + extractionTimeoutSeconds, execute: timeout)
+
+            // Close the parent's copy of the write end, then drain before
+            // waiting: a child that fills the pipe buffer blocks until someone
+            // reads it, so waiting first can deadlock.
             try? pipe.fileHandleForWriting.close()
-
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            task.waitUntilExit()
+            timeout.cancel()
 
             if let output = String(data: data, encoding: .utf8)?.trimmingCharacters(
                 in: .whitespacesAndNewlines),
@@ -1149,6 +1204,7 @@ class ConfigureWindowController: NSWindowController, NSTextFieldDelegate {
     private var ytdlpProcess: Process?
     private var lastValidatedURL: String?
     private let debounceInterval: TimeInterval = 0.2
+    private static let ytDlpValidationTimeout: TimeInterval = 20
 
     override init(window: NSWindow?) {
         let configWindow = NSWindow(
@@ -1306,8 +1362,16 @@ class ConfigureWindowController: NSWindowController, NSTextFieldDelegate {
             return
         }
 
-        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
-            validationState = .invalid("URL must start with http:// or https://")
+        // http:// was previously accepted here and then blocked at playback time
+        // by App Transport Security -- validation showed a green tick for a URL
+        // that could never play. Rejecting it up front is the honest answer.
+        guard let scheme = url.scheme?.lowercased(), scheme == "https" else {
+            if url.scheme?.lowercased() == "http" {
+                validationState = .invalid(
+                    "macOS blocks plain http:// streams. Use an https:// URL.")
+            } else {
+                validationState = .invalid("URL must start with https://")
+            }
             updateUI()
             return
         }
@@ -1355,7 +1419,7 @@ class ConfigureWindowController: NSWindowController, NSTextFieldDelegate {
         // Only fetch first 512 bytes to verify accessibility without downloading entire manifest
         request.setValue("bytes=0-511", forHTTPHeaderField: "Range")
 
-        validationTask = URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
+        validationTask = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 guard let self = self else { return }
 
@@ -1382,6 +1446,17 @@ class ConfigureWindowController: NSWindowController, NSTextFieldDelegate {
 
                 switch httpResponse.statusCode {
                 case 200...299:
+                    // A 2xx alone is not enough: a captive portal or a site's
+                    // custom 404 page answers 200 with HTML. Every HLS playlist
+                    // starts with #EXTM3U, and the ranged request above asks for
+                    // exactly the bytes that would contain it.
+                    let head = String(decoding: data ?? Data(), as: UTF8.self)
+                    guard head.contains("#EXTM3U") else {
+                        self.validationState = .invalid(
+                            "That URL responded, but not with a video stream. Check the link.")
+                        self.updateUI()
+                        return
+                    }
                     self.lastValidatedURL = self.urlTextField.stringValue.trimmingCharacters(
                         in: .whitespacesAndNewlines)
                     self.validationState = .valid
@@ -1406,7 +1481,10 @@ class ConfigureWindowController: NSWindowController, NSTextFieldDelegate {
 
     private func validateWithYtDlp(_ urlString: String) {
         guard let executablePath = findYtDlpPath() else {
-            validationState = .invalid("yt-dlp is required for this URL. Install with: brew install yt-dlp")
+            validationState = .invalid(
+                ytDlpIsInstalled()
+                    ? StreamError.ytDlpUnsafe.reason
+                    : "yt-dlp is required for this URL. Install with: brew install yt-dlp")
             updateUI()
             return
         }
@@ -1427,10 +1505,21 @@ class ConfigureWindowController: NSWindowController, NSTextFieldDelegate {
 
             do {
                 try process.run()
-                process.waitUntilExit()
+
+                // Without this a hung yt-dlp leaves the sheet spinning forever
+                // with OK disabled and no way to tell what went wrong.
+                let timeout = DispatchWorkItem {
+                    guard process.isRunning else { return }
+                    Log.config.error("yt-dlp validation timed out; terminating")
+                    process.terminate()
+                }
+                DispatchQueue.global(qos: .utility).asyncAfter(
+                    deadline: .now() + Self.ytDlpValidationTimeout, execute: timeout)
 
                 let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
                 let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                timeout.cancel()
                 let output = String(data: outputData, encoding: .utf8)?.trimmingCharacters(
                     in: .whitespacesAndNewlines) ?? ""
                 let errorOutput = String(data: errorData, encoding: .utf8)?.trimmingCharacters(
@@ -1475,6 +1564,9 @@ class ConfigureWindowController: NSWindowController, NSTextFieldDelegate {
                             self.validationState = .invalid(
                                 "This stream is currently offline. Try again later or use another URL."
                             )
+                        } else if process.terminationReason == .uncaughtSignal {
+                            self.validationState = .invalid(
+                                "Timed out reading this URL. The site may be slow or blocking us.")
                         } else {
                             self.validationState = .invalid(
                                 "Could not load video. Check the URL or try another.")
