@@ -183,14 +183,47 @@ a tag — useful if notarisation fails for a transient reason.
 
 ### Why not the Mac App Store?
 
-A `.saver` bundle cannot be distributed through the Mac App Store. The store ships
-sandboxed `.app` bundles only, and a screensaver is a plug-in loaded by a system
-process — there is no route for it through App Store Connect. Even repackaged as an
-app, App Sandbox forbids what this screensaver does: spawning `yt-dlp` as a
-subprocess, and reading executables out of `/opt/homebrew/bin`.
+Screen savers cannot be shipped through the Mac App Store, and the obvious workaround —
+an app that bundles a `.saver` and installs it — is prohibited by name.
 
-Developer ID plus notarisation gives the same practical outcome — a double-clickable
-install with no scary warnings — which is what the App Store was wanted for.
+[App Store Review Guideline 2.4.5(ii)](https://developer.apple.com/app-store/review/guidelines/)
+requires Mac App Store apps to be "self-contained, single app installation bundles" that
+"cannot install code or resources in shared locations". `~/Library/Screen Savers` is such a
+location. A developer who tried exactly this
+[reported the rejection](https://developer.apple.com/forums/thread/87231): Apple told them
+their app "attempts to install a screensaver" and to remove the functionality. 2.4.5(iv)
+covers the same ground from the other direction — apps "may not download or install
+standalone apps, kexts, additional code, or resources to add functionality".
+
+This is a **policy** limit rather than a technical one, which matters because the technical
+workarounds do not help. A sandboxed app *can* legitimately write outside its container by
+having the user pick the destination in an `NSSavePanel` and holding a security-scoped
+bookmark; 2.4.5(ii) still forbids the result. (Separately, App Sandbox would also block
+this screensaver's use of `yt-dlp`, since sandboxed apps may not execute arbitrary external
+binaries — so a Mac App Store build could support direct HLS and stream.place only.)
+
+The apps on the store that look like screensavers are standalone full-screen apps that
+mimic one. They do not appear in System Settings → Screen Saver and do not start on idle.
+
+#### The mechanism exists, just not for third parties
+
+Since macOS 10.15, Apple's own screen savers are not `.saver` bundles at all — they are
+App Extensions in `/System/Library/ExtensionKit/Extensions` (`WallpaperMacintoshExtension.appex`
+and friends). That is exactly the "app with a bundled saver" shape that would make store
+distribution coherent, but **the API is private and undocumented**. The one third-party
+screensaver using it,
+[Aerial](https://github.com/AerialScreensaver/Aerial), does so through private API, which is
+an automatic App Store rejection.
+
+Apple's own developer support
+[has acknowledged the gap](https://developer.apple.com/forums/thread/797121): screen savers
+"use the old in-process plug-in model", it "would be better if we updated the API to support
+the more sustainable app extension plug-in model", and developers who care are invited to
+file an enhancement request. Until that lands, there is no supported route.
+
+**So: Developer ID plus notarisation**, which is what this repository does. It gives a
+double-clickable install with no Gatekeeper warning, which is the outcome the App Store was
+wanted for in the first place.
 
 ## Contributing
 

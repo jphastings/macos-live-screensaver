@@ -45,3 +45,17 @@ The README described a build-it-yourself project. With releases now signed, nota
 - The note describing the Options button bug as an unexplained macOS quirk is gone; it is now a one-line troubleshooting entry saying it was fixed.
 
 The "vibe-coded" disclaimer stays — it is honest and useful context for anyone reading the code — reworded only to past tense.
+
+## Correction folded in after review
+
+The `Why not the Mac App Store?` section written in SAVE-rycg led with the sandbox
+argument. That was the weaker reason, and it left the obvious follow-up question ("what
+about an app that bundles the saver?") looking unexamined.
+
+Rewritten here to lead with App Store Review Guideline 2.4.5(ii) and the rejection
+precedent, which address the bundled-app case directly, and to record that Apple's own
+screen savers use a private App Extension API that third parties cannot use. The sandbox
+point remains as the second, independent obstacle it actually is.
+
+Landed in this bean rather than SAVE-rycg to avoid rewriting nine descendant branches for
+a documentation change; the end state after the stack merges is identical.
