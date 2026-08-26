@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+# A newer push to the same branch makes an in-flight run irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Show toolchain versions
+        run: |
+          sw_vers
+          swiftc --version
+          xcodebuild -version
+
+      - name: Build screensaver
+        run: make build
+
+      - name: Verify bundle structure
+        run: make verify
+
+  format:
+    name: Format
+    runs-on: macos-latest
+    # Advisory until the existing sources have been run through the formatter
+    # once on a macOS machine (`make format`). Flip to blocking after that —
+    # tracked in SAVE-hrpq.
+    continue-on-error: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install swift-format
+        run: brew install swift-format
+
+      - name: Check formatting
+        run: make lint

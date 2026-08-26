@@ -1,11 +1,11 @@
 ---
 # SAVE-hrpq
 title: Add CI build & lint checks on pull requests
-status: todo
+status: completed
 type: task
 priority: high
 created_at: 2026-08-26T07:06:13Z
-updated_at: 2026-08-26T07:06:13Z
+updated_at: 2026-08-26T07:11:36Z
 parent: SAVE-58vg
 ---
 
@@ -15,8 +15,25 @@ Split verification from publication: a `ci.yml` that builds (and later, tests) o
 
 ## Tasks
 
-- [ ] Add `.github/workflows/ci.yml` running on `pull_request` and `push` to `main`
-- [ ] Build the screensaver and assert the bundle structure is intact (binary, Info.plist, thumbnail)
-- [ ] Add a `swift-format --lint` check with a checked-in `.swift-format` config
-- [ ] Add a `make lint` / `make check` target so the same checks run locally
-- [ ] Concurrency group so superseded PR runs are cancelled
+- [x] Add `.github/workflows/ci.yml` running on `pull_request` and `push` to `main`
+- [x] Build the screensaver and assert the bundle structure is intact (binary, Info.plist, thumbnail)
+- [x] Add a `swift-format --lint` check with a checked-in `.swift-format` config
+- [x] Add a `make lint` / `make check` target so the same checks run locally
+- [x] Concurrency group so superseded PR runs are cancelled
+
+## Summary of Changes
+
+Added `.github/workflows/ci.yml` with two jobs, running on every pull request and on pushes to `main`, with a concurrency group that cancels superseded runs.
+
+- **build** — compiles the screensaver and runs `make verify`, a new target asserting the bundle contains its executable, `Info.plist` and thumbnail, that the plist is well-formed, that `NSPrincipalClass` is still `LiveScreensaverView`, and that the signature validates. A silently-broken bundle now fails in CI instead of on a user's machine.
+- **format** — installs `swift-format` and runs `make lint` against a checked-in `.swift-format` config (100 columns, 4-space indent, matching the existing style).
+
+`release.yml` now calls `make verify` too, replacing its weaker inline directory check, so the release path and the PR path assert the same things.
+
+## Follow-up: the format job is advisory
+
+The format job is `continue-on-error: true` for now. `screensaver.swift` was not written by a formatter throughout — the spinner path construction around lines 531-539 uses manual continuation alignment that `swift-format` will rewrite — so making the check blocking immediately would put every subsequent PR red on a pre-existing issue.
+
+- [ ] Run `make format` on a macOS machine, commit the result, then remove `continue-on-error` from the format job
+
+Left undone deliberately rather than guessed at: reformatting 1,100 lines without being able to run the formatter would produce an unreviewable diff.
