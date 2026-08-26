@@ -498,6 +498,13 @@ class LiveScreensaverView: ScreenSaverView {
     private var spinnerLayer: CAShapeLayer?
     private var startTime = Date()
 
+    /// Our own copy of `isPreview`, so `deinit` can consult it without touching
+    /// the superclass during deallocation.
+    private var isPreviewInstance = false
+    /// `exit(0)` skips `deinit`, so the shared player has to be released
+    /// explicitly on that path. This guards against releasing it twice.
+    private var hasReleasedPlayer = false
+
     private func getSystemIdleTime() -> TimeInterval {
         return CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .mouseMoved)
     }
@@ -564,6 +571,18 @@ class LiveScreensaverView: ScreenSaverView {
     private func setupScreensaver() {
         animationTimeInterval = 1.0 / 30.0
         wantsLayer = true
+        isPreviewInstance = isPreview
+
+        // System Settings instantiates this same class for the small preview
+        // thumbnail. That instance must not open a stream -- a second download
+        // for a thumbnail nobody is watching -- and must never reach the
+        // idle-exit path in animateOneFrame(), which would terminate the process
+        // hosting System Settings itself.
+        guard !isPreviewInstance else {
+            needsDisplay = true
+            return
+        }
+
         showSpinner()
 
         // Listen for player ready notification
@@ -611,14 +630,38 @@ class LiveScreensaverView: ScreenSaverView {
     override func draw(_ rect: NSRect) {
         NSColor.black.setFill()
         rect.fill()
+
+        if isPreviewInstance {
+            drawPreviewPlaceholder()
+        }
+    }
+
+    /// A static stand-in for the System Settings preview: no network, no
+    /// animation, just enough to show which stream is configured.
+    private func drawPreviewPlaceholder() {
+        let configured =
+            ScreenSaverDefaults(forModuleWithName: ModuleName)?.string(forKey: URLKey) ?? DefaultURL
+        let label = URL(string: configured)?.host ?? "Live Screensaver"
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: max(8, bounds.height / 12)),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.6),
+        ]
+        let attributed = NSAttributedString(string: label, attributes: attributes)
+        let size = attributed.size()
+        attributed.draw(
+            at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2))
     }
 
     override func animateOneFrame() {
+        // The preview has no player, no stream and no business quitting anything.
+        guard !isPreviewInstance else { return }
+
         if Date().timeIntervalSince(startTime) > 2.0 {
             let idleTime = getSystemIdleTime()
             let screenLocked = isScreenLocked()
             if idleTime < 1.0 && !screenLocked {
-                exit(0)
+                stopOnUserActivity()
             }
         }
 
@@ -626,6 +669,24 @@ class LiveScreensaverView: ScreenSaverView {
 
         // Let the shared manager handle stall detection and recovery
         SharedPlayerManager.shared.checkStall()
+    }
+
+    /// Ends the screensaver when the user comes back.
+    ///
+    /// `exit(0)` terminates the host process rather than just this view, and
+    /// skips `deinit` on the way out, so the shared player is released
+    /// explicitly first. Reached only on a real screensaver instance -- never in
+    /// preview, where it would take System Settings down with it.
+    private func stopOnUserActivity() {
+        stopAnimation()
+        releasePlayer()
+        exit(0)
+    }
+
+    private func releasePlayer() {
+        guard !isPreviewInstance, !hasReleasedPlayer else { return }
+        hasReleasedPlayer = true
+        SharedPlayerManager.shared.unregisterView()
     }
 
     private var configController: ConfigureWindowController?
@@ -640,7 +701,7 @@ class LiveScreensaverView: ScreenSaverView {
     deinit {
         NotificationCenter.default.removeObserver(self)
         playerLayer?.removeFromSuperlayer()
-        SharedPlayerManager.shared.unregisterView()
+        releasePlayer()
     }
 }
 

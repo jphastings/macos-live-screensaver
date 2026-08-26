@@ -78,7 +78,9 @@ make start      # Trigger screensaver immediately
 
 <img width="526" height="587" alt="Image" src="https://github.com/user-attachments/assets/67d314ff-e17e-43bc-baed-df20c9ece80b" />
 
-**Note**: macOS screensaver UI can be buggy. If the Options button is unresponsive, try closing and reopening System Settings. PRs welcome for anyone who can figure out why.
+**Note**: older versions could make System Settings' Options button stop responding. The
+preview instance was quitting its host process a couple of seconds after appearing; it no
+longer runs the screensaver's idle-detection logic. If you still see it, please open an issue.
 ## Maintainer: release signing
 
 Releases are signed with a **Developer ID Application** certificate and notarised by

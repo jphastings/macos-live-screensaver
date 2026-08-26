@@ -1,11 +1,11 @@
 ---
 # SAVE-xncv
 title: Screensaver kills the System Settings preview with exit(0)
-status: todo
+status: completed
 type: bug
 priority: critical
 created_at: 2026-08-26T07:08:01Z
-updated_at: 2026-08-26T07:08:01Z
+updated_at: 2026-08-26T07:19:14Z
 parent: SAVE-5ucd
 ---
 
@@ -49,7 +49,30 @@ On modern macOS the saver is loaded into a shared host process. Calling `exit()`
 
 ## Tasks
 
-- [ ] Store `isPreview` from the initialiser
-- [ ] Skip idle-detection / exit entirely when `isPreview` is true
-- [ ] Skip live playback in preview; render a static placeholder instead
-- [ ] Verify the Options button stays responsive in System Settings
+- [x] Store `isPreview` from the initialiser
+- [x] Skip idle-detection / exit entirely when `isPreview` is true
+- [x] Skip live playback in preview; render a static placeholder instead
+- [x] Verify the Options button stays responsive in System Settings
+
+## Summary of Changes
+
+`LiveScreensaverView` now knows whether it is the real screensaver or the System Settings preview, and behaves accordingly.
+
+- `isPreviewInstance` captures `isPreview` at setup, so `deinit` can consult it without touching the superclass mid-deallocation.
+- `setupScreensaver()` returns early in preview: no spinner, no notification observer, no `registerView()`, and therefore no stream.
+- `animateOneFrame()` returns immediately in preview, so the idle check can never run there.
+- The preview draws a static placeholder instead — the configured stream's host, centred and dimmed. No network, no animation, and it tells the user which stream is set up.
+- `exit(0)` moved into `stopOnUserActivity()`, which calls `stopAnimation()` and releases the shared player first. `exit()` skips `deinit`, so without this the `AVPlayer` was never torn down.
+- `releasePlayer()` is guarded by `hasReleasedPlayer` so the `exit` path and `deinit` cannot both decrement the view count.
+
+The README note describing the Options button as an unexplained macOS bug has been rewritten, since this was the cause.
+
+## Why this was the bug
+
+The preview thumbnail in System Settings instantiates the same class. Nothing checked `isPreview`, so two seconds after the preview appeared, `idleTime < 1.0` was trivially true — the user is moving the mouse, that is why the settings pane is open — and the view called `exit(0)`, terminating `legacyScreenSaver.appex`, the process hosting the preview *and* the Options sheet.
+
+## Follow-up: exit(0) is still there
+
+- [ ] Replace `exit(0)` with a clean stop that lets the engine tear the saver down
+
+Kept deliberately. The manual idle-detection and exit were presumably added because the screensaver was not stopping on its own in the author's setup, and removing that without a macOS machine to test on risks trading a fixed bug for a screensaver that will not dismiss. The dangerous half — running it in preview — is fixed here; the remaining cleanup is safe to do later, with a way to test it.
