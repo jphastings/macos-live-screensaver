@@ -4,6 +4,11 @@ import CryptoKit
 import Quartz
 import ScreenSaver
 
+// The preferences domain for ScreenSaverDefaults. This deliberately does NOT
+// match CFBundleIdentifier (me.byjp.livescreensaver): changing it would orphan
+// the settings of everyone who already has the screensaver installed, since
+// their configured URL lives under this name. Migrate the stored values before
+// ever changing this string.
 private let ModuleName = "com.livescreensaver.app"
 private let URLKey = "HLSStreamURL"
 private let StreamStartTimeKey = "StreamStartTime"
