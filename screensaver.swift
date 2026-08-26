@@ -69,6 +69,39 @@ private func getStreamPlaceHLSURL(_ urlString: String) -> URL? {
 
 private extension Notification.Name {
     static let sharedPlayerReady = Notification.Name("SharedPlayerReadyNotification")
+    static let sharedPlayerFailed = Notification.Name("SharedPlayerFailedNotification")
+}
+
+/// Why playback could not start or continue, in terms a user can act on.
+///
+/// The configuration sheet already explains failures well while a URL is being
+/// typed. These are the same class of problem discovered later -- a stream that
+/// ends overnight, or a yt-dlp that gets uninstalled -- where the only place to
+/// say anything is the screensaver itself.
+enum StreamError {
+    case ytDlpMissing
+    case extractionFailed
+    case invalidConfiguredURL
+    case streamUnavailable
+    case noNetwork
+    case retriesExhausted
+
+    var reason: String {
+        switch self {
+        case .ytDlpMissing:
+            return "YouTube streams need yt-dlp. Install it with: brew install yt-dlp"
+        case .extractionFailed:
+            return "Couldn't read the stream address for this URL."
+        case .invalidConfiguredURL:
+            return "That URL doesn't look like a stream. Check it in Options."
+        case .streamUnavailable:
+            return "The stream is offline or has ended."
+        case .noNetwork:
+            return "No internet connection."
+        case .retriesExhausted:
+            return "The stream kept dropping out. It may be having problems."
+        }
+    }
 }
 
 /// Manages a single AVPlayer instance shared across all screensaver views.
@@ -90,6 +123,10 @@ private class SharedPlayerManager {
     /// Set once the retry budget is spent, so the manager stops churning.
     private(set) var hasFailedPermanently = false
     private var lastStallCheck = Date.distantPast
+    /// What to report if the retries run out; set by whichever step failed.
+    private var failureHint: StreamError?
+    /// Non-nil once playback has given up. Views render this.
+    private(set) var currentError: StreamError?
 
     private let defaults = ScreenSaverDefaults(forModuleWithName: ModuleName)!
     private let cacheExpirationSeconds: TimeInterval = 300
@@ -125,11 +162,24 @@ private class SharedPlayerManager {
         NotificationCenter.default.post(name: .sharedPlayerReady, object: self)
     }
 
+    /// Give up and tell the views why, so the user sees something other than a
+    /// black screen.
+    private func failPermanently(with error: StreamError) {
+        hasFailedPermanently = true
+        isSettingUp = false
+        isRetryScheduled = false
+        stallDetectionTime = nil
+        currentError = error
+        player?.pause()
+        NotificationCenter.default.post(name: .sharedPlayerFailed, object: self)
+    }
+
     private func setupPlayer() {
         guard !isSettingUp else {
             return
         }
         isSettingUp = true
+        failureHint = nil
 
         let originalURLString = defaults.string(forKey: URLKey) ?? DefaultURL
 
@@ -137,7 +187,7 @@ private class SharedPlayerManager {
             guard let hlsURL = getStreamPlaceHLSURL(originalURLString) else {
                 // Previously returned with isSettingUp still true, permanently
                 // wedging the manager: no view could ever trigger setup again.
-                isSettingUp = false
+                failPermanently(with: .invalidConfiguredURL)
                 return
             }
             loadVideo(url: hlsURL)
@@ -147,6 +197,12 @@ private class SharedPlayerManager {
         var urlString = originalURLString
 
         if needsYtDlpExtraction(originalURLString) {
+            // Retrying will not conjure up a missing binary, so say so straight
+            // away rather than spending the retry budget first.
+            guard findYtDlpPath() != nil else {
+                failPermanently(with: .ytDlpMissing)
+                return
+            }
             currentSourceURL = originalURLString
 
             if let cachedURL = getCachedHLSURL(for: originalURLString) {
@@ -166,6 +222,7 @@ private class SharedPlayerManager {
                         // forever and the user on an endless spinner.
                         guard let extracted = extracted, let url = URL(string: extracted) else {
                             self.isSettingUp = false
+                            self.failureHint = .extractionFailed
                             self.handlePlaybackFailure()
                             return
                         }
@@ -177,7 +234,7 @@ private class SharedPlayerManager {
         }
 
         guard let url = URL(string: urlString) else {
-            isSettingUp = false
+            failPermanently(with: .invalidConfiguredURL)
             return
         }
 
@@ -203,8 +260,15 @@ private class SharedPlayerManager {
                     self?.isRetryScheduled = false
                     self?.hasFailedPermanently = false
                     self?.isSettingUp = false
+                    self?.failureHint = nil
+                    self?.currentError = nil
                     self?.notifyViewsPlayerReady()
                 } else if item.status == .failed {
+                    if self?.failureHint == nil {
+                        self?.failureHint =
+                            (item.error as NSError?)?.code == NSURLErrorNotConnectedToInternet
+                            ? .noNetwork : .streamUnavailable
+                    }
                     self?.handlePlaybackFailure()
                 }
             }
@@ -292,8 +356,7 @@ private class SharedPlayerManager {
         stallDetectionTime = nil
 
         guard retryCount < maxRetries else {
-            hasFailedPermanently = true
-            isSettingUp = false
+            failPermanently(with: failureHint ?? .retriesExhausted)
             return
         }
 
@@ -387,6 +450,8 @@ private class SharedPlayerManager {
         hasFailedPermanently = false
         stallDetectionTime = nil
         lastStallCheck = .distantPast
+        failureHint = nil
+        currentError = nil
         viewCount = 0
     }
 
@@ -564,6 +629,16 @@ class LiveScreensaverView: ScreenSaverView {
     /// explicitly on that path. This guards against releasing it twice.
     private var hasReleasedPlayer = false
 
+    /// The "Unable to stream" notice, and its DVD-logo drift.
+    private var noticeLayer: CATextLayer?
+    private var noticeOrigin: CGPoint = .zero
+    private var noticeVelocity = CGVector(dx: 48, dy: 33)
+    private var lastNoticeTick: Date?
+    /// Bounds the notice was laid out against, so a resolution change can
+    /// trigger a re-wrap rather than leaving it mis-sized or off-screen.
+    private var noticeLayoutBounds: CGRect = .zero
+    private var displayedError: StreamError?
+
     private func getSystemIdleTime() -> TimeInterval {
         return CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .mouseMoved)
     }
@@ -652,6 +727,13 @@ class LiveScreensaverView: ScreenSaverView {
             object: nil
         )
 
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(onSharedPlayerFailed),
+            name: .sharedPlayerFailed,
+            object: nil
+        )
+
         // Register with the shared player manager
         let manager = SharedPlayerManager.shared
         manager.registerView()
@@ -659,12 +741,176 @@ class LiveScreensaverView: ScreenSaverView {
         // If player is already ready (another view already set it up), attach immediately
         if manager.player != nil {
             attachPlayerLayer()
+        } else if let error = manager.currentError {
+            // A second display attached after playback had already given up.
+            showErrorNotice(error)
         }
     }
 
     /// Called by SharedPlayerManager when the player becomes ready
     @objc private func onSharedPlayerReady() {
+        hideErrorNotice()
         attachPlayerLayer()
+    }
+
+    /// Called by SharedPlayerManager when playback has given up.
+    @objc private func onSharedPlayerFailed() {
+        guard let error = SharedPlayerManager.shared.currentError else { return }
+        showErrorNotice(error)
+    }
+
+    // MARK: - Error notice
+
+    /// Builds the notice: "Unable to stream" in bold, the reason underneath in
+    /// regular weight, wrapped so the block sits close to 16:9.
+    private func noticeText(for error: StreamError) -> NSAttributedString {
+        let titleSize = max(16, bounds.height / 26)
+        let bodySize = titleSize * 0.62
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineBreakMode = .byWordWrapping
+
+        let text = NSMutableAttributedString(
+            string: "Unable to stream\n",
+            attributes: [
+                .font: NSFont.boldSystemFont(ofSize: titleSize),
+                .foregroundColor: NSColor.white,
+                .paragraphStyle: paragraph,
+            ]
+        )
+        text.append(
+            NSAttributedString(
+                string: error.reason,
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: bodySize),
+                    .foregroundColor: NSColor.white.withAlphaComponent(0.75),
+                    .paragraphStyle: paragraph,
+                ]
+            )
+        )
+        return text
+    }
+
+    /// Finds the wrap width whose resulting text block is closest to 16:9.
+    ///
+    /// Height falls as width grows (the same words wrap into fewer lines), so
+    /// the height-to-width ratio decreases monotonically and can be searched.
+    private func noticeSize(for text: NSAttributedString) -> CGSize {
+        func height(atWidth width: CGFloat) -> CGFloat {
+            ceil(
+                text.boundingRect(
+                    with: CGSize(width: width, height: .greatestFiniteMagnitude),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading]
+                ).height)
+        }
+
+        var narrow = max(160, bounds.width * 0.15)
+        var wide = max(narrow + 1, bounds.width * 0.6)
+        let target: CGFloat = 9.0 / 16.0
+
+        for _ in 0..<14 {
+            let mid = (narrow + wide) / 2
+            if height(atWidth: mid) / mid > target {
+                narrow = mid
+            } else {
+                wide = mid
+            }
+        }
+        return CGSize(width: ceil(wide), height: height(atWidth: wide))
+    }
+
+    private func showErrorNotice(_ error: StreamError) {
+        guard !isPreviewInstance, bounds.width > 0, bounds.height > 0 else { return }
+
+        hideSpinner()
+        playerLayer?.removeFromSuperlayer()
+        playerLayer = nil
+        noticeLayer?.removeFromSuperlayer()
+
+        let text = noticeText(for: error)
+        let size = noticeSize(for: text)
+
+        let notice = CATextLayer()
+        notice.string = text
+        notice.isWrapped = true
+        notice.alignmentMode = .center
+        notice.contentsScale = window?.backingScaleFactor ?? 2
+        notice.bounds = CGRect(origin: .zero, size: size)
+        notice.anchorPoint = .zero
+
+        // Start somewhere off-centre so multiple displays are not in lockstep.
+        noticeOrigin = CGPoint(
+            x: (bounds.width - size.width) * CGFloat.random(in: 0.15...0.85),
+            y: (bounds.height - size.height) * CGFloat.random(in: 0.15...0.85)
+        )
+        notice.position = noticeOrigin
+        lastNoticeTick = nil
+
+        wantsLayer = true
+        layer?.addSublayer(notice)
+        noticeLayer = notice
+        noticeLayoutBounds = bounds
+        displayedError = error
+    }
+
+    private func hideErrorNotice() {
+        noticeLayer?.removeFromSuperlayer()
+        noticeLayer = nil
+        lastNoticeTick = nil
+        displayedError = nil
+        noticeLayoutBounds = .zero
+    }
+
+    /// Drifts the notice across the screen, reflecting off the edges. Keeps the
+    /// text moving so it cannot burn in, and makes it obvious the machine is
+    /// alive rather than hung.
+    private func advanceErrorNotice() {
+        guard let notice = noticeLayer else { return }
+
+        // Display reconfigured (resolution change, or the saver moved between
+        // screens): re-wrap against the new bounds.
+        if bounds != noticeLayoutBounds, let error = displayedError {
+            showErrorNotice(error)
+            return
+        }
+
+        let now = Date()
+        defer { lastNoticeTick = now }
+        guard let last = lastNoticeTick else { return }
+        // Cap the step so a stalled frame cannot teleport the notice.
+        let elapsed = min(now.timeIntervalSince(last), 0.1)
+        guard elapsed > 0 else { return }
+
+        let size = notice.bounds.size
+        let maxX = max(0, bounds.width - size.width)
+        let maxY = max(0, bounds.height - size.height)
+
+        noticeOrigin.x += noticeVelocity.dx * elapsed
+        noticeOrigin.y += noticeVelocity.dy * elapsed
+
+        if noticeOrigin.x <= 0 {
+            noticeOrigin.x = 0
+            noticeVelocity.dx = abs(noticeVelocity.dx)
+        } else if noticeOrigin.x >= maxX {
+            noticeOrigin.x = maxX
+            noticeVelocity.dx = -abs(noticeVelocity.dx)
+        }
+
+        if noticeOrigin.y <= 0 {
+            noticeOrigin.y = 0
+            noticeVelocity.dy = abs(noticeVelocity.dy)
+        } else if noticeOrigin.y >= maxY {
+            noticeOrigin.y = maxY
+            noticeVelocity.dy = -abs(noticeVelocity.dy)
+        }
+
+        // Implicit layer animations would smear a per-frame move; the drift is
+        // already continuous.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        notice.position = noticeOrigin
+        CATransaction.commit()
     }
 
     private func attachPlayerLayer() {
@@ -725,6 +971,7 @@ class LiveScreensaverView: ScreenSaverView {
         }
 
         playerLayer?.frame = bounds
+        advanceErrorNotice()
 
         // Let the shared manager handle stall detection and recovery
         SharedPlayerManager.shared.checkStall()
