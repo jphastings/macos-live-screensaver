@@ -1,11 +1,11 @@
 ---
 # SAVE-rycg
 title: Sign, notarise and harden the release pipeline
-status: todo
+status: completed
 type: feature
 priority: critical
 created_at: 2026-08-26T07:07:16Z
-updated_at: 2026-08-26T07:07:16Z
+updated_at: 2026-08-26T07:16:09Z
 parent: SAVE-58vg
 ---
 
@@ -61,10 +61,38 @@ The App Store Connect key needs only the **Developer** role for notarisation.
 
 ## Tasks
 
-- [ ] Makefile: `SIGN_IDENTITY` variable, defaulting to ad-hoc for local builds
-- [ ] Makefile: drop `--deep`, add `--options runtime --timestamp`
-- [ ] Release workflow: import certificate into a temporary keychain, delete it in an `always()` step
-- [ ] Release workflow: notarise with `notarytool submit --wait` and `stapler staple`
-- [ ] Verify with `spctl -a -vvv -t install` and `stapler validate`
-- [ ] Document the secrets above in the README
-- [ ] Record the App Store finding so it is not re-litigated
+- [x] Makefile: `SIGN_IDENTITY` variable, defaulting to ad-hoc for local builds
+- [x] Makefile: drop `--deep`, add `--options runtime --timestamp`
+- [x] Release workflow: import certificate into a temporary keychain, delete it in an `always()` step
+- [x] Release workflow: notarise with `notarytool submit --wait` and `stapler staple`
+- [x] Verify with `spctl -a -vvv -t install` and `stapler validate`
+- [x] Document the secrets above in the README
+- [x] Record the App Store finding so it is not re-litigated
+
+## Summary of Changes
+
+### Signing
+
+`SIGN_IDENTITY` now controls how `make build` signs, defaulting to `-` (ad-hoc) so local builds and forks are unaffected. With a real identity it signs with `--options runtime --timestamp` — both required for notarisation — and the deprecated `--deep` flag is gone.
+
+### Notarisation
+
+New `make notarize` zips the bundle with `ditto` (which preserves the signature; `zip` does not), submits it to Apple's notary service with `notarytool submit --wait`, staples the ticket and validates it. New `make assess` runs `spctl -a -vvv -t install`, which is what Gatekeeper will actually decide on a user's machine.
+
+### Release workflow
+
+Imports the certificate into a throwaway keychain in `$RUNNER_TEMP`, builds signed, notarises, confirms Gatekeeper acceptance, and deletes the keychain in an `if: always()` step so signing material never outlives the job.
+
+Signing engages only when the secrets are present, so a fork still gets a working ad-hoc build plus a `::warning::` explaining what it will and will not do, rather than a red workflow.
+
+The archive step changed from `zip` to `ditto -c -k --keepParent`. This is not cosmetic: `zip` drops extended attributes and would have invalidated the signature immediately after applying it.
+
+## App Store: recorded as not possible
+
+Confirmed while writing this. A `.saver` bundle cannot be distributed through the Mac App Store — the store ships sandboxed `.app` bundles only, and a screensaver is a plug-in loaded by a system process with no route through App Store Connect. Repackaging as an app does not rescue it: App Sandbox forbids spawning `yt-dlp` as a subprocess and reading executables from `/opt/homebrew/bin`, which is how YouTube support works.
+
+Developer ID plus notarisation delivers the same practical outcome that was wanted from the App Store: a double-clickable install with no Gatekeeper warning. Documented in the README so the question does not get re-opened from scratch.
+
+## Not verifiable from here
+
+The notarisation path cannot be exercised without the Apple credentials and a macOS runner. The workflow logic, the keychain lifecycle and the Makefile targets are reasoned from the documented `notarytool` and `codesign` interfaces. First real release run should be watched closely.

@@ -1,4 +1,4 @@
-.PHONY: build install clean uninstall start verify lint format
+.PHONY: build install clean uninstall start verify lint format notarize assess
 
 SCREENSAVER_NAME = LiveScreensaver.saver
 INSTALL_DIR = $(HOME)/Library/Screen\ Savers
@@ -19,6 +19,11 @@ ARCHS ?= arm64 x86_64
 # Without this the deployment target is whatever SDK the build machine has, so a
 # runner image upgrade would raise the minimum OS without anyone noticing.
 MACOS_MIN ?= 13.0
+
+# Code signing identity. The default "-" is an ad-hoc signature, which is fine
+# for a local build but is rejected by Gatekeeper on any machine that did not
+# build it. Release CI overrides this with a Developer ID Application identity.
+SIGN_IDENTITY ?= -
 
 SWIFT_FLAGS = -emit-library -module-name LiveScreensaver \
 	-framework ScreenSaver -framework AVFoundation \
@@ -48,7 +53,15 @@ build:
 		$(BUILD_DIR)/$(SCREENSAVER_NAME)/Contents/Info.plist
 	qlmanage -t -s 267 -o $(BUILD_DIR)/$(SCREENSAVER_NAME)/Contents/Resources/ thumbnail.svg
 	mv $(BUILD_DIR)/$(SCREENSAVER_NAME)/Contents/Resources/thumbnail.svg.png $(BUILD_DIR)/$(SCREENSAVER_NAME)/Contents/Resources/thumbnail.png
-	codesign --force --deep --sign - $(BUILD_DIR)/$(SCREENSAVER_NAME)
+	@set -e; \
+	if [ "$(SIGN_IDENTITY)" = "-" ]; then \
+		echo "Ad-hoc signing (local build; will not pass Gatekeeper elsewhere)"; \
+		codesign --force --sign - $(BUILD_DIR)/$(SCREENSAVER_NAME); \
+	else \
+		echo "Signing with: $(SIGN_IDENTITY)"; \
+		codesign --force --options runtime --timestamp \
+			--sign "$(SIGN_IDENTITY)" $(BUILD_DIR)/$(SCREENSAVER_NAME); \
+	fi
 
 install: build
 	cp -r $(BUILD_DIR)/$(SCREENSAVER_NAME) $(INSTALL_DIR)/
@@ -75,6 +88,32 @@ verify:
 	echo "Architectures: $$(lipo -archs "$$bundle/Contents/MacOS/LiveScreensaver")"; \
 	codesign --verify --verbose "$$bundle"; \
 	echo "Bundle verified"
+
+# Submit the built bundle to Apple's notary service and staple the ticket, so
+# the screensaver opens without a Gatekeeper warning on a machine that has never
+# seen it. Requires an App Store Connect API key; see README.
+notarize:
+	@set -e; \
+	test -n "$$APPLE_API_KEY_PATH" || { echo "APPLE_API_KEY_PATH is not set"; exit 1; }; \
+	test -n "$$APPLE_API_KEY_ID" || { echo "APPLE_API_KEY_ID is not set"; exit 1; }; \
+	test -n "$$APPLE_API_ISSUER_ID" || { echo "APPLE_API_ISSUER_ID is not set"; exit 1; }; \
+	echo "Submitting for notarisation (this can take a few minutes)"; \
+	ditto -c -k --keepParent \
+		$(BUILD_DIR)/$(SCREENSAVER_NAME) $(BUILD_DIR)/notarize.zip; \
+	xcrun notarytool submit $(BUILD_DIR)/notarize.zip \
+		--key "$$APPLE_API_KEY_PATH" \
+		--key-id "$$APPLE_API_KEY_ID" \
+		--issuer "$$APPLE_API_ISSUER_ID" \
+		--wait; \
+	rm -f $(BUILD_DIR)/notarize.zip; \
+	xcrun stapler staple $(BUILD_DIR)/$(SCREENSAVER_NAME); \
+	xcrun stapler validate $(BUILD_DIR)/$(SCREENSAVER_NAME); \
+	echo "Notarised and stapled"
+
+# What Gatekeeper will decide on a user's machine. Only meaningful after a
+# Developer ID signature and notarisation; an ad-hoc build is expected to fail.
+assess:
+	spctl -a -vvv -t install $(BUILD_DIR)/$(SCREENSAVER_NAME)
 
 lint:
 	swift-format lint --strict --recursive .
