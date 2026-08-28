@@ -137,26 +137,32 @@ Add these under **Settings → Secrets and variables → Actions → New reposit
 
 | Secret | What it is | How to get it |
 | --- | --- | --- |
-| `MACOS_CERTIFICATE` | Base64 of the Developer ID Application `.p12` | Xcode → Settings → Accounts → Manage Certificates → right-click the Developer ID Application cert → Export. Then `base64 -i cert.p12 \| pbcopy` |
-| `MACOS_CERTIFICATE_PWD` | The password you set when exporting that `.p12` | Chosen at export time |
-| `MACOS_SIGNING_IDENTITY` | The full identity name, e.g. `Developer ID Application: Jane Doe (AB12CD34EF)` | `security find-identity -v -p codesigning` |
-| `KEYCHAIN_PASSWORD` | Any random string | `openssl rand -base64 24` — used only for the throwaway keychain CI creates and deletes |
-| `APPLE_API_KEY_ID` | App Store Connect API key ID | App Store Connect → Users and Access → Integrations → Keys → generate a key with the **Developer** role |
-| `APPLE_API_ISSUER_ID` | Issuer ID | Shown at the top of that same Keys page |
-| `APPLE_API_KEY_P8` | Base64 of the downloaded `AuthKey_XXXXXXXX.p8` | `base64 -i AuthKey_XXXXXXXX.p8 \| pbcopy` — **Apple only lets you download this once** |
+| `MACOS_CERT_P12_BASE64` | Base64 of the Developer ID Application `.p12` | Xcode → Settings → Accounts → Manage Certificates → right-click the Developer ID Application cert → Export. Then `base64 -i cert.p12 \| pbcopy` |
+| `MACOS_CERT_PASSWORD` | The password you set when exporting that `.p12` | Chosen at export time |
+| `APPLE_TEAM_ID` | Your 10-character Apple Developer Team ID | Apple Developer → Membership, or the `(...)` suffix from `security find-identity -v -p codesigning` |
+| `ASC_KEY_ID` | App Store Connect API key ID | App Store Connect → Users and Access → Integrations → Keys → generate a **Team**-scoped key with the Developer role |
+| `ASC_ISSUER_ID` | Issuer ID | Shown at the top of that same Keys page |
+| `ASC_PRIVATE_KEY_BASE64` | Base64 of the downloaded `AuthKey_XXXXXXXX.p8` | `base64 -i AuthKey_XXXXXXXX.p8 \| pbcopy` — **Apple only lets you download this once** |
 
 The API-key route is used rather than an Apple ID with an app-specific password: it is
 not tied to a personal account, does not break when 2FA settings change, and can be
-revoked independently.
+revoked independently. There's no `KEYCHAIN_PASSWORD` secret — CI generates a random
+one for the throwaway signing keychain it creates and deletes within the same job.
+
+These credentials identify the Apple Developer Team, not this app, so they're shared
+across every repo signed under it — nothing here is specific to this screensaver.
+
+CI also attests build provenance (`actions/attest-build-provenance`) via keyless
+OIDC/Sigstore signing, no secrets required.
 
 ### Signing a build locally
 
 ```bash
 make build SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 
-export APPLE_API_KEY_PATH=~/private_keys/AuthKey_XXXXXXXX.p8
-export APPLE_API_KEY_ID=XXXXXXXX
-export APPLE_API_ISSUER_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+export ASC_KEY_PATH=~/private_keys/AuthKey_XXXXXXXX.p8
+export ASC_KEY_ID=XXXXXXXX
+export ASC_ISSUER_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 make notarize
 make assess     # what Gatekeeper will decide on a user's machine
 ```
