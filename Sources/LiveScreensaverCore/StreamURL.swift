@@ -40,5 +40,14 @@ func getStreamPlaceHLSURL(_ urlString: String) -> URL? {
         return nil
     }
 
-    return URL(string: "https://\(host)/api/playback/\(username)/hls/index.m3u8")
+    // stream.place has no predictable per-user REST path; live HLS is served
+    // through this AT Protocol XRPC query, which resolves a Bluesky handle to
+    // its DID and returns the CMAF master playlist.
+    // https://stream.place/docs/lex-reference/playback/place-stream-playback-getliveplaylist/
+    var components = URLComponents()
+    components.scheme = "https"
+    components.host = host
+    components.path = "/xrpc/place.stream.playback.getLivePlaylist"
+    components.queryItems = [URLQueryItem(name: "streamer", value: username)]
+    return components.url
 }
