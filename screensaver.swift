@@ -1,8 +1,35 @@
 import AVFoundation
 import Cocoa
 import CryptoKit
+import OSLog
 import Quartz
 import ScreenSaver
+
+// MARK: - Logging
+
+// A screensaver cannot be debugged interactively: it exits the moment you touch
+// the machine, and it runs inside a system host process you did not launch.
+// Logging is the only diagnostic channel, so it is worth doing properly.
+// Users can collect these with Console.app, filtering on this subsystem.
+private enum Log {
+    private static let subsystem = "me.byjp.livescreensaver"
+
+    static let player = Logger(subsystem: subsystem, category: "player")
+    static let extraction = Logger(subsystem: subsystem, category: "extraction")
+    static let config = Logger(subsystem: subsystem, category: "config")
+
+    /// Stream URLs routinely carry signed tokens and expiry signatures in their
+    /// query strings. Log enough to identify the stream, never enough to share
+    /// someone's credentials in a bug report.
+    static func redact(_ urlString: String) -> String {
+        guard var components = URLComponents(string: urlString) else { return "<unparseable url>" }
+        let hadQuery = components.query != nil
+        components.query = nil
+        components.fragment = nil
+        let base = components.string ?? "<unparseable url>"
+        return hadQuery ? base + "?<redacted>" : base
+    }
+}
 
 // The preferences domain for ScreenSaverDefaults. This deliberately does NOT
 // match CFBundleIdentifier (me.byjp.livescreensaver): changing it would orphan
@@ -27,6 +54,28 @@ private let ytdlpPaths = [
 private func findYtDlpPath() -> String? {
     return ytdlpPaths.first { FileManager.default.isExecutableFile(atPath: $0) }
 }
+
+/// Looked up once per process. yt-dlp breaks against YouTube often enough that
+/// "which version" is the first question worth asking about a broken stream.
+private let ytdlpVersion: String = {
+    guard let path = findYtDlpPath() else { return "not installed" }
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: path)
+    task.arguments = ["--version"]
+    let pipe = Pipe()
+    task.standardOutput = pipe
+    task.standardError = Pipe()
+    do {
+        try task.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        let version = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (version?.isEmpty == false) ? version! : "unknown"
+    } catch {
+        return "unknown"
+    }
+}()
 
 private func needsYtDlpExtraction(_ urlString: String) -> Bool {
     guard let url = URL(string: urlString),
@@ -146,6 +195,7 @@ private class SharedPlayerManager {
 
     func registerView() {
         viewCount += 1
+        Log.player.debug("View registered (\(self.viewCount) attached)")
         if viewCount == 1 && player == nil && !isSettingUp {
             setupPlayer()
         }
@@ -153,6 +203,7 @@ private class SharedPlayerManager {
 
     func unregisterView() {
         viewCount -= 1
+        Log.player.debug("View unregistered (\(self.viewCount) attached)")
         if viewCount <= 0 {
             cleanup()
         }
@@ -165,6 +216,7 @@ private class SharedPlayerManager {
     /// Give up and tell the views why, so the user sees something other than a
     /// black screen.
     private func failPermanently(with error: StreamError) {
+        Log.player.error("Giving up: \(error.reason, privacy: .public)")
         hasFailedPermanently = true
         isSettingUp = false
         isRetryScheduled = false
@@ -182,6 +234,7 @@ private class SharedPlayerManager {
         failureHint = nil
 
         let originalURLString = defaults.string(forKey: URLKey) ?? DefaultURL
+        Log.player.info("Setting up player for \(Log.redact(originalURLString), privacy: .public)")
 
         if isStreamPlaceURL(originalURLString) {
             guard let hlsURL = getStreamPlaceHLSURL(originalURLString) else {
@@ -199,19 +252,24 @@ private class SharedPlayerManager {
         if needsYtDlpExtraction(originalURLString) {
             // Retrying will not conjure up a missing binary, so say so straight
             // away rather than spending the retry budget first.
-            guard findYtDlpPath() != nil else {
+            guard let ytDlp = findYtDlpPath() else {
+                Log.extraction.error("yt-dlp not found in any known location")
                 failPermanently(with: .ytDlpMissing)
                 return
             }
+            Log.extraction.info(
+                "Using yt-dlp \(ytdlpVersion, privacy: .public) at \(ytDlp, privacy: .public)")
             currentSourceURL = originalURLString
 
             if let cachedURL = getCachedHLSURL(for: originalURLString) {
+                Log.extraction.info("Cache hit; refreshing in the background")
                 urlString = cachedURL
 
                 DispatchQueue.global(qos: .background).async { [weak self] in
                     _ = self?.extractHLSURL(originalURLString, forceRefresh: true)
                 }
             } else {
+                Log.extraction.info("Cache miss; extracting synchronously")
                 DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                     let extracted = self?.extractHLSURL(originalURLString)
                     DispatchQueue.main.async {
@@ -262,6 +320,7 @@ private class SharedPlayerManager {
                     self?.isSettingUp = false
                     self?.failureHint = nil
                     self?.currentError = nil
+                    Log.player.info("Player ready")
                     self?.notifyViewsPlayerReady()
                 } else if item.status == .failed {
                     if self?.failureHint == nil {
@@ -362,6 +421,9 @@ private class SharedPlayerManager {
 
         retryCount += 1
         isRetryScheduled = true
+        Log.player.notice(
+            "Playback failed; retry \(self.retryCount)/\(self.maxRetries) in \(pow(2.0, Double(self.retryCount - 1)))s"
+        )
 
         if let sourceURL = currentSourceURL {
             let cacheFile = getCacheFilePath(for: sourceURL)
@@ -531,7 +593,7 @@ private class SharedPlayerManager {
         do {
             try url.write(toFile: cacheFile, atomically: true, encoding: .utf8)
         } catch {
-            NSLog("Failed to cache HLS URL: \(error)")
+            Log.extraction.error("Failed to cache extracted URL: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -561,14 +623,15 @@ private class SharedPlayerManager {
                     }
                 }
             } catch {
-                NSLog("Failed to check lock file attributes: \(error)")
+                Log.extraction.error(
+                    "Failed to read lock file attributes: \(error.localizedDescription, privacy: .public)")
             }
         }
 
         do {
             try "".write(toFile: lockFile, atomically: true, encoding: .utf8)
         } catch {
-            NSLog("Failed to create lock file: \(error)")
+            Log.extraction.error("Failed to create lock file: \(error.localizedDescription, privacy: .public)")
         }
 
         let task = Process()
@@ -586,6 +649,7 @@ private class SharedPlayerManager {
         task.standardError = Pipe()
 
         var extractedURL: String?
+        let startedAt = Date()
 
         do {
             try task.run()
@@ -603,8 +667,18 @@ private class SharedPlayerManager {
                 cacheHLSURL(firstURL, for: sourceURL)
                 extractedURL = firstURL
             }
+
+            let elapsed = Date().timeIntervalSince(startedAt)
+            if extractedURL != nil {
+                Log.extraction.info(
+                    "Extracted stream URL in \(String(format: "%.1f", elapsed), privacy: .public)s")
+            } else {
+                Log.extraction.error(
+                    "yt-dlp exited \(task.terminationStatus) with no URL after \(String(format: "%.1f", elapsed), privacy: .public)s"
+                )
+            }
         } catch {
-            NSLog("Failed to execute yt-dlp: \(error)")
+            Log.extraction.error("yt-dlp failed to launch: \(error.localizedDescription, privacy: .public)")
         }
 
         try? FileManager.default.removeItem(atPath: lockFile)
@@ -1416,6 +1490,7 @@ class ConfigureWindowController: NSWindowController, NSTextFieldDelegate {
             urlString = DefaultURL
         }
 
+        Log.config.info("Saved stream URL \(Log.redact(urlString), privacy: .public)")
         defaults.set(urlString, forKey: URLKey)
         defaults.removeObject(forKey: StreamStartTimeKey)  // Reset sync time for new stream
         defaults.synchronize()
