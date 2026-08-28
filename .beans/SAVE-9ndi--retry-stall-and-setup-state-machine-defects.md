@@ -1,11 +1,11 @@
 ---
 # SAVE-9ndi
 title: Retry, stall and setup state machine defects
-status: todo
+status: completed
 type: bug
 priority: high
 created_at: 2026-08-26T07:08:01Z
-updated_at: 2026-08-26T07:08:01Z
+updated_at: 2026-08-26T07:21:07Z
 parent: SAVE-5ucd
 ---
 
@@ -57,8 +57,34 @@ In both cases `isSettingUp` stays `true` forever. No view can ever trigger setup
 
 ## Tasks
 
-- [ ] Clear `stallDetectionTime` in `handlePlaybackFailure()` and guard re-entry while a retry is scheduled
-- [ ] Move `retryPlayback()`'s yt-dlp call off the main queue
-- [ ] Ensure every exit path from `setupPlayer()` clears `isSettingUp`
-- [ ] Add a `failed` terminal state so exhausting retries is explicit rather than implicit
-- [ ] Rate-limit `checkStall()` so it does real work at most ~1 Hz, not 30 Hz per view
+- [x] Clear `stallDetectionTime` in `handlePlaybackFailure()` and guard re-entry while a retry is scheduled
+- [x] Move `retryPlayback()`'s yt-dlp call off the main queue
+- [x] Ensure every exit path from `setupPlayer()` clears `isSettingUp`
+- [x] Add a `failed` terminal state so exhausting retries is explicit rather than implicit
+- [x] Rate-limit `checkStall()` so it does real work at most ~1 Hz, not 30 Hz per view
+
+## Summary of Changes
+
+### Backoff now actually backs off
+
+`handlePlaybackFailure()` gained a re-entry guard (`isRetryScheduled`, `hasFailedPermanently`) and now clears `stallDetectionTime` on entry. Previously it did neither, so the next animation frame — 33 ms later — saw the same expired stall and called straight back in. The retry budget was spent in about three frames and every `pow(2.0, ...)` delay fired at once against a stream that had been given no time to recover.
+
+### yt-dlp no longer runs on the main thread
+
+`retryPlayback()` dispatches `extractHLSURL()` to a background queue and hops back to main to load the result. It was calling it directly from a main-queue `asyncAfter`, and `extractHLSURL` uses `waitUntilExit()` — freezing the screensaver and its host process for however long yt-dlp took.
+
+### The two permanent wedges are closed
+
+Both paths that returned from `setupPlayer()` with `isSettingUp` still `true` — an unparseable stream.place URL, and an initial extraction returning nil — now clear the flag. Because `registerView()` only starts setup when `!isSettingUp`, either one previously meant no view could ever trigger setup again and the user sat on the spinner until the machine slept.
+
+### Terminal failure is explicit
+
+`hasFailedPermanently` is set when the retry budget is spent, and cleared on a successful `readyToPlay`. This stops the manager churning after giving up, and gives the error-notice bean a state to render.
+
+### checkStall() throttled
+
+It was doing real work — and calling `player?.play()` — 30 times a second per view, so N monitors multiplied the rate. Now throttled to once a second, and it returns early while setup or a retry is in flight rather than fighting them.
+
+## Not verified by execution
+
+No Swift toolchain available here, so this is reasoned from the source rather than run. The state machine is the part of this codebase most worth a careful read in review; the intended invariant is that `isSettingUp`, `isRetryScheduled` and `hasFailedPermanently` are each cleared on exactly one success path (`readyToPlay`) and on `cleanup()`.

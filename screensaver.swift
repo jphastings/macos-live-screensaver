@@ -83,12 +83,22 @@ private class SharedPlayerManager {
     private var isSettingUp = false
     private var currentSourceURL: String?
     private var retryCount = 0
+    /// True between scheduling a retry and that retry resolving. Without it,
+    /// `checkStall()` -- which runs on every animation frame of every view --
+    /// re-enters the failure path before the previous retry has had a chance.
+    private var isRetryScheduled = false
+    /// Set once the retry budget is spent, so the manager stops churning.
+    private(set) var hasFailedPermanently = false
+    private var lastStallCheck = Date.distantPast
 
     private let defaults = ScreenSaverDefaults(forModuleWithName: ModuleName)!
     private let cacheExpirationSeconds: TimeInterval = 300
     private let extractionTimeoutSeconds: TimeInterval = 15
     private let maxRetries = 3
     private let stallTimeoutSeconds: TimeInterval = 10
+    /// `checkStall()` is called at the animation frame rate by every view. The
+    /// work it does only needs to happen about once a second.
+    private let stallCheckInterval: TimeInterval = 1
     private var stallDetectionTime: Date?
 
     private static let expirationRegex = try? NSRegularExpression(
@@ -124,9 +134,13 @@ private class SharedPlayerManager {
         let originalURLString = defaults.string(forKey: URLKey) ?? DefaultURL
 
         if isStreamPlaceURL(originalURLString) {
-            if let hlsURL = getStreamPlaceHLSURL(originalURLString) {
-                loadVideo(url: hlsURL)
+            guard let hlsURL = getStreamPlaceHLSURL(originalURLString) else {
+                // Previously returned with isSettingUp still true, permanently
+                // wedging the manager: no view could ever trigger setup again.
+                isSettingUp = false
+                return
             }
+            loadVideo(url: hlsURL)
             return
         }
 
@@ -143,12 +157,19 @@ private class SharedPlayerManager {
                 }
             } else {
                 DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                    if let hlsURL = self?.extractHLSURL(originalURLString) {
-                        DispatchQueue.main.async {
-                            if let url = URL(string: hlsURL) {
-                                self?.loadVideo(url: url)
-                            }
+                    let extracted = self?.extractHLSURL(originalURLString)
+                    DispatchQueue.main.async {
+                        guard let self = self else { return }
+                        // Extraction can fail because yt-dlp is missing, the
+                        // lock is held, or the network is down. Previously this
+                        // block simply did nothing, leaving isSettingUp true
+                        // forever and the user on an endless spinner.
+                        guard let extracted = extracted, let url = URL(string: extracted) else {
+                            self.isSettingUp = false
+                            self.handlePlaybackFailure()
+                            return
                         }
+                        self.loadVideo(url: url)
                     }
                 }
                 return
@@ -179,6 +200,8 @@ private class SharedPlayerManager {
                     self?.synchronizePlayback()
                     self?.stallDetectionTime = nil
                     self?.retryCount = 0
+                    self?.isRetryScheduled = false
+                    self?.hasFailedPermanently = false
                     self?.isSettingUp = false
                     self?.notifyViewsPlayerReady()
                 } else if item.status == .failed {
@@ -258,12 +281,24 @@ private class SharedPlayerManager {
     }
 
     private func handlePlaybackFailure() {
+        // Re-entry guard. This is reachable from checkStall(), which every view
+        // calls on every animation frame; without it a single expired stall
+        // spends the entire retry budget within a few frames and the
+        // exponential backoff below never actually delays anything.
+        guard !isRetryScheduled, !hasFailedPermanently else { return }
+
+        // Clearing this is what stops the next frame seeing the same expired
+        // stall and calling straight back in.
+        stallDetectionTime = nil
+
         guard retryCount < maxRetries else {
+            hasFailedPermanently = true
             isSettingUp = false
             return
         }
 
         retryCount += 1
+        isRetryScheduled = true
 
         if let sourceURL = currentSourceURL {
             let cacheFile = getCacheFilePath(for: sourceURL)
@@ -281,42 +316,62 @@ private class SharedPlayerManager {
         player?.pause()
         stallDetectionTime = nil
 
-        if let sourceURL = currentSourceURL {
-            if let hlsURL = extractHLSURL(sourceURL), let url = URL(string: hlsURL) {
-                loadVideo(url: url)
-            } else {
-                handlePlaybackFailure()
-            }
-        } else {
+        guard let sourceURL = currentSourceURL else {
+            // A direct HLS URL needs no extraction; rebuild from defaults.
+            isRetryScheduled = false
             isSettingUp = false
             setupPlayer()
+            return
+        }
+
+        // extractHLSURL() runs yt-dlp with waitUntilExit(). On the main queue
+        // that freezes the screensaver, and the process hosting it, for however
+        // long yt-dlp takes -- typically seconds. The initial setup path already
+        // dispatches this off the main queue; this one did not.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let extracted = self?.extractHLSURL(sourceURL)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.isRetryScheduled = false
+                guard let extracted = extracted, let url = URL(string: extracted) else {
+                    self.handlePlaybackFailure()
+                    return
+                }
+                self.loadVideo(url: url)
+            }
         }
     }
 
     func checkStall() {
-        if let stallTime = stallDetectionTime {
-            let stallDuration = Date().timeIntervalSince(stallTime)
-            if stallDuration > stallTimeoutSeconds {
-                handlePlaybackFailure()
-                return
-            }
-        }
+        // Called from animateOneFrame(), so this runs at the frame rate for
+        // every connected display. Throttle to roughly once a second.
+        let now = Date()
+        guard now.timeIntervalSince(lastStallCheck) >= stallCheckInterval else { return }
+        lastStallCheck = now
 
-        let isPlaying = player?.rate ?? 0 > 0
-        let hasError = player?.error != nil || playerItem?.error != nil
+        // Nothing to police while setup or a retry is in flight, or once the
+        // retry budget is spent.
+        guard !hasFailedPermanently, !isRetryScheduled, !isSettingUp else { return }
 
-        if hasError {
+        if let stallTime = stallDetectionTime,
+            now.timeIntervalSince(stallTime) > stallTimeoutSeconds
+        {
             handlePlaybackFailure()
             return
         }
 
-        if !isPlaying {
+        if player?.error != nil || playerItem?.error != nil {
+            handlePlaybackFailure()
+            return
+        }
+
+        if (player?.rate ?? 0) > 0 {
+            stallDetectionTime = nil
+        } else {
             if stallDetectionTime == nil {
-                stallDetectionTime = Date()
+                stallDetectionTime = now
             }
             player?.play()
-        } else {
-            stallDetectionTime = nil
         }
     }
 
@@ -328,6 +383,10 @@ private class SharedPlayerManager {
         playerItem = nil
         isSettingUp = false
         retryCount = 0
+        isRetryScheduled = false
+        hasFailedPermanently = false
+        stallDetectionTime = nil
+        lastStallCheck = .distantPast
         viewCount = 0
     }
 
