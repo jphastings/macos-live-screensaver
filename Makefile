@@ -1,4 +1,4 @@
-.PHONY: build install clean uninstall start verify lint format
+.PHONY: build install clean uninstall start verify lint format notarize assess
 
 SCREENSAVER_NAME = LiveScreensaver.saver
 INSTALL_DIR = $(HOME)/Library/Screen\ Savers
@@ -11,18 +11,41 @@ VERSION ?= 0.0.0
 # Monotonic build number. Release CI passes the run number.
 BUILD_NUMBER ?= 0
 
+# Architectures to build and merge into the shipped binary. Without an explicit
+# -target, swiftc emits a single slice for whatever the build machine happens to
+# be -- which on CI means Apple Silicon only, silently excluding every Intel Mac.
+ARCHS ?= arm64 x86_64
+# Minimum macOS. Must stay in step with LSMinimumSystemVersion in Info.plist.
+# Without this the deployment target is whatever SDK the build machine has, so a
+# runner image upgrade would raise the minimum OS without anyone noticing.
+MACOS_MIN ?= 13.0
+
+# Code signing identity. The default "-" is an ad-hoc signature, which is fine
+# for a local build but is rejected by Gatekeeper on any machine that did not
+# build it. Release CI overrides this with a Developer ID Application identity.
+SIGN_IDENTITY ?= -
+
+SWIFT_FLAGS = -emit-library -module-name LiveScreensaver \
+	-framework ScreenSaver -framework AVFoundation \
+	-framework Cocoa -framework Quartz
+SOURCES = screensaver.swift
+
 build:
-	rm -rf $(BUILD_DIR)/$(SCREENSAVER_NAME)
+	rm -rf $(BUILD_DIR)/$(SCREENSAVER_NAME) $(BUILD_DIR)/slices
 	mkdir -p $(BUILD_DIR)/$(SCREENSAVER_NAME)/Contents/MacOS
 	mkdir -p $(BUILD_DIR)/$(SCREENSAVER_NAME)/Contents/Resources
-	swiftc -emit-library \
-		-o $(BUILD_DIR)/$(SCREENSAVER_NAME)/Contents/MacOS/LiveScreensaver \
-		-module-name LiveScreensaver \
-		-framework ScreenSaver \
-		-framework AVFoundation \
-		-framework Cocoa \
-		-framework Quartz \
-		screensaver.swift
+	mkdir -p $(BUILD_DIR)/slices
+	@set -e; for arch in $(ARCHS); do \
+		echo "Compiling $$arch slice (macOS $(MACOS_MIN) minimum)"; \
+		swiftc $(SWIFT_FLAGS) \
+			-target $$arch-apple-macos$(MACOS_MIN) \
+			-o $(BUILD_DIR)/slices/LiveScreensaver-$$arch \
+			$(SOURCES); \
+	done
+	lipo -create -output \
+		$(BUILD_DIR)/$(SCREENSAVER_NAME)/Contents/MacOS/LiveScreensaver \
+		$(foreach arch,$(ARCHS),$(BUILD_DIR)/slices/LiveScreensaver-$(arch))
+	rm -rf $(BUILD_DIR)/slices
 	cp Info.plist $(BUILD_DIR)/$(SCREENSAVER_NAME)/Contents/Info.plist
 	plutil -replace CFBundleShortVersionString -string "$(VERSION)" \
 		$(BUILD_DIR)/$(SCREENSAVER_NAME)/Contents/Info.plist
@@ -30,7 +53,15 @@ build:
 		$(BUILD_DIR)/$(SCREENSAVER_NAME)/Contents/Info.plist
 	qlmanage -t -s 267 -o $(BUILD_DIR)/$(SCREENSAVER_NAME)/Contents/Resources/ thumbnail.svg
 	mv $(BUILD_DIR)/$(SCREENSAVER_NAME)/Contents/Resources/thumbnail.svg.png $(BUILD_DIR)/$(SCREENSAVER_NAME)/Contents/Resources/thumbnail.png
-	codesign --force --deep --sign - $(BUILD_DIR)/$(SCREENSAVER_NAME)
+	@set -e; \
+	if [ "$(SIGN_IDENTITY)" = "-" ]; then \
+		echo "Ad-hoc signing (local build; will not pass Gatekeeper elsewhere)"; \
+		codesign --force --sign - $(BUILD_DIR)/$(SCREENSAVER_NAME); \
+	else \
+		echo "Signing with: $(SIGN_IDENTITY)"; \
+		codesign --force --options runtime --timestamp \
+			--sign "$(SIGN_IDENTITY)" $(BUILD_DIR)/$(SCREENSAVER_NAME); \
+	fi
 
 install: build
 	cp -r $(BUILD_DIR)/$(SCREENSAVER_NAME) $(INSTALL_DIR)/
@@ -48,8 +79,41 @@ verify:
 		|| { echo "NSPrincipalClass is not LiveScreensaverView"; exit 1; }; \
 	test "$$(plutil -extract CFBundleShortVersionString raw "$$bundle/Contents/Info.plist")" = "$(VERSION)" \
 		|| { echo "version was not stamped into Info.plist"; exit 1; }; \
+	test "$$(plutil -extract LSMinimumSystemVersion raw "$$bundle/Contents/Info.plist")" = "$(MACOS_MIN)" \
+		|| { echo "LSMinimumSystemVersion does not match MACOS_MIN ($(MACOS_MIN))"; exit 1; }; \
+	for arch in $(ARCHS); do \
+		lipo -archs "$$bundle/Contents/MacOS/LiveScreensaver" | grep -qw "$$arch" \
+			|| { echo "missing architecture: $$arch"; exit 1; }; \
+	done; \
+	echo "Architectures: $$(lipo -archs "$$bundle/Contents/MacOS/LiveScreensaver")"; \
 	codesign --verify --verbose "$$bundle"; \
 	echo "Bundle verified"
+
+# Submit the built bundle to Apple's notary service and staple the ticket, so
+# the screensaver opens without a Gatekeeper warning on a machine that has never
+# seen it. Requires an App Store Connect API key; see README.
+notarize:
+	@set -e; \
+	test -n "$$APPLE_API_KEY_PATH" || { echo "APPLE_API_KEY_PATH is not set"; exit 1; }; \
+	test -n "$$APPLE_API_KEY_ID" || { echo "APPLE_API_KEY_ID is not set"; exit 1; }; \
+	test -n "$$APPLE_API_ISSUER_ID" || { echo "APPLE_API_ISSUER_ID is not set"; exit 1; }; \
+	echo "Submitting for notarisation (this can take a few minutes)"; \
+	ditto -c -k --keepParent \
+		$(BUILD_DIR)/$(SCREENSAVER_NAME) $(BUILD_DIR)/notarize.zip; \
+	xcrun notarytool submit $(BUILD_DIR)/notarize.zip \
+		--key "$$APPLE_API_KEY_PATH" \
+		--key-id "$$APPLE_API_KEY_ID" \
+		--issuer "$$APPLE_API_ISSUER_ID" \
+		--wait; \
+	rm -f $(BUILD_DIR)/notarize.zip; \
+	xcrun stapler staple $(BUILD_DIR)/$(SCREENSAVER_NAME); \
+	xcrun stapler validate $(BUILD_DIR)/$(SCREENSAVER_NAME); \
+	echo "Notarised and stapled"
+
+# What Gatekeeper will decide on a user's machine. Only meaningful after a
+# Developer ID signature and notarisation; an ad-hoc build is expected to fail.
+assess:
+	spctl -a -vvv -t install $(BUILD_DIR)/$(SCREENSAVER_NAME)
 
 lint:
 	swift-format lint --strict --recursive .

@@ -79,6 +79,78 @@ make start      # Trigger screensaver immediately
 <img width="526" height="587" alt="Image" src="https://github.com/user-attachments/assets/67d314ff-e17e-43bc-baed-df20c9ece80b" />
 
 **Note**: macOS screensaver UI can be buggy. If the Options button is unresponsive, try closing and reopening System Settings. PRs welcome for anyone who can figure out why.
+## Maintainer: release signing
+
+Releases are signed with a **Developer ID Application** certificate and notarised by
+Apple, so the screensaver opens without a Gatekeeper warning on machines that have
+never seen it. This needs an [Apple Developer Program](https://developer.apple.com/programs/)
+membership (99 USD/year).
+
+Signing engages only when the secrets below are present. A fork, or this repo before
+the secrets are added, still builds — it just produces an ad-hoc bundle that Gatekeeper
+will reject, and the workflow logs a warning saying so.
+
+### Required repository secrets
+
+Add these under **Settings → Secrets and variables → Actions → New repository secret**.
+
+| Secret | What it is | How to get it |
+| --- | --- | --- |
+| `MACOS_CERTIFICATE` | Base64 of the Developer ID Application `.p12` | Xcode → Settings → Accounts → Manage Certificates → right-click the Developer ID Application cert → Export. Then `base64 -i cert.p12 \| pbcopy` |
+| `MACOS_CERTIFICATE_PWD` | The password you set when exporting that `.p12` | Chosen at export time |
+| `MACOS_SIGNING_IDENTITY` | The full identity name, e.g. `Developer ID Application: Jane Doe (AB12CD34EF)` | `security find-identity -v -p codesigning` |
+| `KEYCHAIN_PASSWORD` | Any random string | `openssl rand -base64 24` — used only for the throwaway keychain CI creates and deletes |
+| `APPLE_API_KEY_ID` | App Store Connect API key ID | App Store Connect → Users and Access → Integrations → Keys → generate a key with the **Developer** role |
+| `APPLE_API_ISSUER_ID` | Issuer ID | Shown at the top of that same Keys page |
+| `APPLE_API_KEY_P8` | Base64 of the downloaded `AuthKey_XXXXXXXX.p8` | `base64 -i AuthKey_XXXXXXXX.p8 \| pbcopy` — **Apple only lets you download this once** |
+
+The API-key route is used rather than an Apple ID with an app-specific password: it is
+not tied to a personal account, does not break when 2FA settings change, and can be
+revoked independently.
+
+### Signing a build locally
+
+```bash
+make build SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+
+export APPLE_API_KEY_PATH=~/private_keys/AuthKey_XXXXXXXX.p8
+export APPLE_API_KEY_ID=XXXXXXXX
+export APPLE_API_ISSUER_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+make notarize
+make assess     # what Gatekeeper will decide on a user's machine
+```
+
+`make build` on its own ad-hoc signs, which is all you need for local testing.
+
+### Cutting a release
+
+Releases are triggered by pushing a tag, not by merging to `main`. The tag *is* the
+version — it is stamped into `CFBundleShortVersionString`, so a user can always tell
+you exactly which build they are running.
+
+```bash
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+The workflow validates the tag is `vX.Y.Z`, builds and signs it, notarises, and
+publishes a release with generated notes and a versioned artefact
+(`LiveScreensaver-1.2.0.zip`).
+
+`workflow_dispatch` is available as an escape hatch to re-run a release without moving
+a tag — useful if notarisation fails for a transient reason.
+
+### Why not the Mac App Store?
+
+A `.saver` bundle cannot be distributed through the Mac App Store. The store ships
+sandboxed `.app` bundles only, and a screensaver is a plug-in loaded by a system
+process — there is no route for it through App Store Connect. Even repackaged as an
+app, App Sandbox forbids what this screensaver does: spawning `yt-dlp` as a
+subprocess, and reading executables out of `/opt/homebrew/bin`.
+
+Developer ID plus notarisation gives the same practical outcome — a double-clickable
+install with no scary warnings — which is what the App Store was wanted for.
+
 ## Troubleshooting
 
 **YouTube videos don't play**:
