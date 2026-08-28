@@ -79,6 +79,66 @@ make start      # Trigger screensaver immediately
 <img width="526" height="587" alt="Image" src="https://github.com/user-attachments/assets/67d314ff-e17e-43bc-baed-df20c9ece80b" />
 
 **Note**: macOS screensaver UI can be buggy. If the Options button is unresponsive, try closing and reopening System Settings. PRs welcome for anyone who can figure out why.
+## Maintainer: release signing
+
+Releases are signed with a **Developer ID Application** certificate and notarised by
+Apple, so the screensaver opens without a Gatekeeper warning on machines that have
+never seen it. This needs an [Apple Developer Program](https://developer.apple.com/programs/)
+membership (99 USD/year).
+
+Signing engages only when the secrets below are present. A fork, or this repo before
+the secrets are added, still builds — it just produces an ad-hoc bundle that Gatekeeper
+will reject, and the workflow logs a warning saying so.
+
+### Required repository secrets
+
+Add these under **Settings → Secrets and variables → Actions → New repository secret**.
+
+| Secret | What it is | How to get it |
+| --- | --- | --- |
+| `MACOS_CERT_P12_BASE64` | Base64 of the Developer ID Application `.p12` | Xcode → Settings → Accounts → Manage Certificates → right-click the Developer ID Application cert → Export. Then `base64 -i cert.p12 \| pbcopy` |
+| `MACOS_CERT_PASSWORD` | The password you set when exporting that `.p12` | Chosen at export time |
+| `APPLE_TEAM_ID` | Your 10-character Apple Developer Team ID | Apple Developer → Membership, or the `(...)` suffix from `security find-identity -v -p codesigning` |
+| `ASC_KEY_ID` | App Store Connect API key ID | App Store Connect → Users and Access → Integrations → Keys → generate a **Team**-scoped key with the Developer role |
+| `ASC_ISSUER_ID` | Issuer ID | Shown at the top of that same Keys page |
+| `ASC_PRIVATE_KEY_BASE64` | Base64 of the downloaded `AuthKey_XXXXXXXX.p8` | `base64 -i AuthKey_XXXXXXXX.p8 \| pbcopy` — **Apple only lets you download this once** |
+
+The API-key route is used rather than an Apple ID with an app-specific password: it is
+not tied to a personal account, does not break when 2FA settings change, and can be
+revoked independently. There's no `KEYCHAIN_PASSWORD` secret — CI generates a random
+one for the throwaway signing keychain it creates and deletes within the same job.
+
+These credentials identify the Apple Developer Team, not this app, so they're shared
+across every repo signed under it — nothing here is specific to this screensaver.
+
+CI also attests build provenance (`actions/attest-build-provenance`) via keyless
+OIDC/Sigstore signing, no secrets required.
+
+### Signing a build locally
+
+```bash
+make build SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+
+export ASC_KEY_PATH=~/private_keys/AuthKey_XXXXXXXX.p8
+export ASC_KEY_ID=XXXXXXXX
+export ASC_ISSUER_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+make notarize
+make assess     # what Gatekeeper will decide on a user's machine
+```
+
+`make build` on its own ad-hoc signs, which is all you need for local testing.
+
+### Why not the Mac App Store?
+
+A `.saver` bundle cannot be distributed through the Mac App Store. The store ships
+sandboxed `.app` bundles only, and a screensaver is a plug-in loaded by a system
+process — there is no route for it through App Store Connect. Even repackaged as an
+app, App Sandbox forbids what this screensaver does: spawning `yt-dlp` as a
+subprocess, and reading executables out of `/opt/homebrew/bin`.
+
+Developer ID plus notarisation gives the same practical outcome — a double-clickable
+install with no scary warnings — which is what the App Store was wanted for.
+
 ## Troubleshooting
 
 **YouTube videos don't play**:
