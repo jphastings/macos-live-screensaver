@@ -35,11 +35,15 @@ Ad-hoc signing stays the default for local `make build` so contributors without 
 
 Worth settling before any work is planned around it:
 
-- **Screen savers cannot be sold on the Mac App Store.** MAS distributes sandboxed `.app` bundles only; a `.saver` is a plug-in loaded by a system process and has no route through App Store Connect.
-- Even repackaged as a `.app`, **App Sandbox forbids what this screensaver does**: it spawns `yt-dlp` as a subprocess (`Process()` in `extractHLSURL`), writes to `NSTemporaryDirectory()` outside a container, and reads executables from `/opt/homebrew/bin`. Sandboxed apps may not execute arbitrary external binaries.
-- Apps that call themselves screensavers on MAS are ordinary full-screen apps that only mimic one — they do not integrate with System Settings → Screen Saver.
+- **Guideline 2.4.5(ii) is the blocker**, and it names this case. Mac App Store apps must be "self-contained, single app installation bundles" that "cannot install code or resources in shared locations" — `~/Library/Screen Savers` being one. A developer who shipped an app bundling a `.saver` [was rejected with](https://developer.apple.com/forums/thread/87231) "your app attempts to install a screensaver", and told to remove the functionality. 2.4.5(iv) covers the same ground: no installing "additional code, or resources to add functionality".
+- **This is policy, not a technical limit**, which is why the technical workarounds do not rescue it. A sandboxed app can legitimately write outside its container by having the user choose the destination in an `NSSavePanel` and keeping a security-scoped bookmark. 2.4.5(ii) still forbids the outcome.
+- App Sandbox is a *second*, independent problem: it forbids executing arbitrary external binaries, so `yt-dlp` — and therefore YouTube support — could not exist in a store build at all.
+- Apps that call themselves screensavers on MAS are ordinary full-screen apps that only mimic one — they do not integrate with System Settings → Screen Saver and do not start on idle.
+- **The mechanism we would want does exist, privately.** Since macOS 10.15 Apple's own screen savers are App Extensions in `/System/Library/ExtensionKit/Extensions`, not `.saver` bundles — exactly the "app containing a saver" shape that would make store distribution coherent. The API is undocumented; [Aerial](https://github.com/AerialScreensaver/Aerial) is the only third party using it, via private API, which is an automatic rejection. Apple DTS [has said publicly](https://developer.apple.com/forums/thread/797121) that moving screen savers to the app extension model "would be better" and invited enhancement requests. Filing one is the only lever that changes this answer.
 
-**Recommendation:** ship Developer ID + notarisation (this bean). It gives a double-clickable install with no Gatekeeper warnings, which is the outcome the App Store was wanted for. If MAS presence is still desired later, it is a separate product — a sandboxed companion app with a bundled HLS player and no `yt-dlp` — and should be its own milestone.
+**Recommendation:** ship Developer ID + notarisation (this bean). It gives a double-clickable install with no Gatekeeper warnings, which is the outcome the App Store was wanted for. If MAS presence is still desired later, it is a separate product — a full-screen app that is honestly an app, HLS and stream.place only, with no System Settings integration — and should be its own milestone.
+
+Worth watching: macOS Sequoia already demotes third-party screen savers to an "Other" section behind "Show All", and some Tahoe betas did not list them at all. The direction of travel argues for owning distribution rather than waiting on a store route.
 
 ## Secrets required in the repository
 
