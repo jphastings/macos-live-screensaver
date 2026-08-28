@@ -5,7 +5,7 @@ status: completed
 type: feature
 priority: critical
 created_at: 2026-08-26T07:07:16Z
-updated_at: 2026-08-26T07:16:09Z
+updated_at: 2026-08-28T16:01:14Z
 parent: SAVE-58vg
 ---
 
@@ -96,3 +96,34 @@ Developer ID plus notarisation delivers the same practical outcome that was want
 ## Not verifiable from here
 
 The notarisation path cannot be exercised without the Apple credentials and a macOS runner. The workflow logic, the keychain lifecycle and the Makefile targets are reasoned from the documented `notarytool` and `codesign` interfaces. First real release run should be watched closely.
+
+## Secret names updated (2026-08-28)
+
+The provisioning script that pushes signing credentials centrally (`gh-allow-signing`,
+shared across all repos under this Apple Developer Team) uses different secret names
+than this bean originally documented. Renamed to match what's actually on the repo:
+
+| Old | New |
+| --- | --- |
+| `MACOS_CERTIFICATE` | `MACOS_CERT_P12_BASE64` |
+| `MACOS_CERTIFICATE_PWD` | `MACOS_CERT_PASSWORD` |
+| `MACOS_SIGNING_IDENTITY` | *(removed — see below)* |
+| `KEYCHAIN_PASSWORD` | *(removed — see below)* |
+| `APPLE_API_KEY_ID` | `ASC_KEY_ID` |
+| `APPLE_API_ISSUER_ID` | `ASC_ISSUER_ID` |
+| `APPLE_API_KEY_P8` | `ASC_PRIVATE_KEY_BASE64` |
+| *(new)* | `APPLE_TEAM_ID` |
+
+`MACOS_SIGNING_IDENTITY` no longer exists as a stored secret — the workflow now reads
+the full identity string out of the imported certificate at runtime, matched against
+the new `APPLE_TEAM_ID` secret, since the identity's full name was never actually
+needed as a separate credential. `KEYCHAIN_PASSWORD` is generated with `openssl rand`
+inside the job instead of being a stored secret — the temporary keychain is created
+and destroyed within that same job, so nothing outside the run ever needs it.
+
+Also added build provenance attestation (`actions/attest-build-provenance`, keyless
+OIDC/Sigstore — no credentials needed) and pinned all workflow actions to SHAs via
+`actions-up`.
+
+Updated `.github/workflows/release.yml`, `Makefile` (notarize target env var names),
+and the README secrets table/local-signing instructions to match.

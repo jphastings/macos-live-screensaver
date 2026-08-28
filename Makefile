@@ -94,16 +94,16 @@ verify:
 # seen it. Requires an App Store Connect API key; see README.
 notarize:
 	@set -e; \
-	test -n "$$APPLE_API_KEY_PATH" || { echo "APPLE_API_KEY_PATH is not set"; exit 1; }; \
-	test -n "$$APPLE_API_KEY_ID" || { echo "APPLE_API_KEY_ID is not set"; exit 1; }; \
-	test -n "$$APPLE_API_ISSUER_ID" || { echo "APPLE_API_ISSUER_ID is not set"; exit 1; }; \
+	test -n "$$ASC_KEY_PATH" || { echo "ASC_KEY_PATH is not set"; exit 1; }; \
+	test -n "$$ASC_KEY_ID" || { echo "ASC_KEY_ID is not set"; exit 1; }; \
+	test -n "$$ASC_ISSUER_ID" || { echo "ASC_ISSUER_ID is not set"; exit 1; }; \
 	echo "Submitting for notarisation (this can take a few minutes)"; \
 	ditto -c -k --keepParent \
 		$(BUILD_DIR)/$(SCREENSAVER_NAME) $(BUILD_DIR)/notarize.zip; \
 	xcrun notarytool submit $(BUILD_DIR)/notarize.zip \
-		--key "$$APPLE_API_KEY_PATH" \
-		--key-id "$$APPLE_API_KEY_ID" \
-		--issuer "$$APPLE_API_ISSUER_ID" \
+		--key "$$ASC_KEY_PATH" \
+		--key-id "$$ASC_KEY_ID" \
+		--issuer "$$ASC_ISSUER_ID" \
 		--wait; \
 	rm -f $(BUILD_DIR)/notarize.zip; \
 	xcrun stapler staple $(BUILD_DIR)/$(SCREENSAVER_NAME); \
