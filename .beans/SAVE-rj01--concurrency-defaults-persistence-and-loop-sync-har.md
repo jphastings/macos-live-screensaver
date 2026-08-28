@@ -1,11 +1,11 @@
 ---
 # SAVE-rj01
 title: Concurrency, defaults persistence and loop-sync hardening
-status: todo
+status: completed
 type: bug
 priority: normal
 created_at: 2026-08-26T07:08:35Z
-updated_at: 2026-08-26T07:08:35Z
+updated_at: 2026-08-26T07:27:35Z
 parent: SAVE-5ucd
 ---
 
@@ -52,8 +52,36 @@ Confine all manager state to a single serial queue, or make the whole manager `@
 
 ## Tasks
 
-- [ ] Add `synchronize()` after every defaults write, or centralise writes in one helper
-- [ ] Route loop restarts through `synchronizePlayback()`
-- [ ] Make the extraction lock atomic with `O_CREAT|O_EXCL` and release it with `defer`
-- [ ] Confine manager state to one queue / actor and document the threading contract
-- [ ] Audit `deinit` for main-thread assumptions
+- [x] Add `synchronize()` after every defaults write, or centralise writes in one helper
+- [x] Route loop restarts through `synchronizePlayback()`
+- [x] Make the extraction lock atomic with `O_CREAT|O_EXCL` and release it with `defer`
+- [x] Confine manager state to one queue / actor and document the threading contract
+- [x] Audit `deinit` for main-thread assumptions
+
+## Summary of Changes
+
+### Defaults writes now persist
+
+`ScreenSaverDefaults` requires an explicit `synchronize()` for writes to stick. The configuration sheet did this; `synchronizePlayback()` and `handlePlaybackFailure()` did not. A new `writeDefault(_:forKey:)` helper wraps set/remove plus synchronise, and both call sites use it. The stream start time could previously fail to be written, taking multi-display alignment and the retry reset with it.
+
+### Looping keeps displays in sync
+
+`playerDidFinishPlaying` now calls `synchronizePlayback()` rather than seeking to zero and playing. The old restart ignored `StreamStartTime`, so displays that were aligned when playback began drifted apart after the first loop — the sync was only ever applied once.
+
+### The extraction lock is atomic
+
+`acquireExtractionLock(at:)` uses `open(path, O_CREAT | O_EXCL | O_WRONLY)`. The kernel makes that test-and-create atomic, closing the window in which two processes could both find the lock absent and both spawn yt-dlp.
+
+Stale-lock clearing moved into `clearStaleExtractionLock(at:)`, and release moved to a single `defer` immediately after acquisition. The old code released the lock in two places and missed a third — the `findYtDlpPath()` failure path released it, but a throw between the two release points would have left it behind until it aged out.
+
+### Threading contract, stated and enforced at the edges
+
+The class-level comment now states the invariant: every property is read and written on the main queue only; background work operates on locals and hops back before touching state.
+
+`registerView()` and `unregisterView()` are the two entry points that can arrive from elsewhere — a view's `deinit` is not guaranteed to run on the main thread — so they bounce themselves onto it.
+
+## On the wider concurrency question
+
+The audit found the situation better than the bean assumed. After the retry-path fix in SAVE-9ndi, `extractHLSURL` is only ever called from background queues and touches no manager state — only the file system, a `let` constant and an immutable static regex. Every background block already captured locals and hopped to main before mutating anything. The genuine gap was `deinit`, which is what the bounce above closes.
+
+Converting the manager to `@MainActor` was considered and rejected for now: it would be the more rigorous fix, but it forces `async` through the call sites and cannot be validated without a compiler. The contract is documented and enforced where it can actually be violated, which gets the correctness without the unverifiable churn.
