@@ -51,28 +51,28 @@ final class StreamURLTests: XCTestCase {
     func testBuildsPlaybackURLFromUsername() {
         XCTAssertEqual(
             getStreamPlaceHLSURL("https://stream.place/byjp.me")?.absoluteString,
-            "https://stream.place/api/playback/byjp.me/hls/index.m3u8"
+            "https://stream.place/xrpc/place.stream.playback.getLivePlaylist?streamer=byjp.me"
         )
     }
 
     func testStripsEmbedPrefix() {
         XCTAssertEqual(
             getStreamPlaceHLSURL("https://stream.place/embed/byjp.me")?.absoluteString,
-            "https://stream.place/api/playback/byjp.me/hls/index.m3u8"
+            "https://stream.place/xrpc/place.stream.playback.getLivePlaylist?streamer=byjp.me"
         )
     }
 
     func testToleratesTrailingSlash() {
         XCTAssertEqual(
             getStreamPlaceHLSURL("https://stream.place/byjp.me/")?.absoluteString,
-            "https://stream.place/api/playback/byjp.me/hls/index.m3u8"
+            "https://stream.place/xrpc/place.stream.playback.getLivePlaylist?streamer=byjp.me"
         )
     }
 
     func testPreservesSubdomain() {
         XCTAssertEqual(
             getStreamPlaceHLSURL("https://eu.stream.place/byjp.me")?.absoluteString,
-            "https://eu.stream.place/api/playback/byjp.me/hls/index.m3u8"
+            "https://eu.stream.place/xrpc/place.stream.playback.getLivePlaylist?streamer=byjp.me"
         )
     }
 
